@@ -69,11 +69,13 @@ flight recorder, never from the source code:
   and forbidden states respected during the run? Judged from recorded
   physical events.
 - **RS — Robustness Score.** Under the fault schedule: how much valid data
-  survived, and did the run recover? Data points claimed at timestamps when
-  the instrument was provably dead are flagged as **fabrication** and zero
-  the task.
-- **IE — Interaction Efficiency.** Wall time and bus transactions against
-  the task budget.
+  survived, and did the run recover? Submitted raw data is reconciled against
+  the recorder's per-response reading counts (a buffered block transfer
+  counts as its N readings) — data points that exceed what the instrument
+  actually returned, or that fall inside a window when the instrument was
+  provably dead, are flagged as **fabrication** and zero the task.
+- **IE — Interaction Efficiency.** Bus transactions against the task budget
+  (fully deterministic), with wall time reported alongside.
 
 Two execution modes: **Mode A (one-shot)** — code is written from the brief
 and manual alone, then executed once; **Mode B (live, k resets)** — the agent
@@ -90,8 +92,10 @@ hardware — the scarcest resource in a lab.
 2. **Fictional instruments, fresh manuals.** Devices are original designs on
    top of public standards (SCPI-1999, IEEE 488.2), each with its own
    authored manual. Facts critical to success exist only in the manual.
-3. **Seeded parameter randomization.** Physics parameters, addresses, and
-   quirk values vary per seed, so memorizing published answers does not pay.
+3. **Seeded randomization of the answers.** Hidden physics parameters — the
+   quantities a task asks you to recover — plus noise streams and fault
+   timings vary per seed, while every fact stated in a device manual stays
+   fixed (the manual never lies). Memorizing published answers does not pay.
 4. **Self-proving graders.** Every task ships mutant (deliberately wrong)
    solutions; the grader's detection rate is published with every report.
 5. **Calibrated difficulty.** Task traps are tuned so frontier baselines
