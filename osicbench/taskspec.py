@@ -78,7 +78,7 @@ class TaskSpec:
 
 
 def load_task(task_dir: Path) -> TaskSpec:
-    task_dir = Path(task_dir)
+    task_dir = Path(task_dir).resolve()
     yaml_path = task_dir / "task.yaml"
     if not yaml_path.exists():
         raise FileNotFoundError(f"no task.yaml in {task_dir}")

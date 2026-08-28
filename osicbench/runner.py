@@ -51,7 +51,7 @@ class FarmProcess:
     """The farm as a child process with clean TERM->snapshot shutdown."""
 
     def __init__(self, task: TaskSpec, seed: int, farm_dir: Path) -> None:
-        self.farm_dir = Path(farm_dir)
+        self.farm_dir = Path(farm_dir).resolve()
         self.farm_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
@@ -119,8 +119,8 @@ def run_submission(
     label: str = "unlabeled",
 ) -> RunResult:
     """Mode A execution: farm up -> run submission once -> farm down."""
-    run_dir = Path(out_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(out_dir).resolve()   # absolute: the agent runs with its
+    run_dir.mkdir(parents=True, exist_ok=True)  # own cwd, paths must not re-anchor
     results_dir = run_dir / "results"
     results_dir.mkdir(exist_ok=True)
     main_py = _stage_submission(submission, run_dir / "submission")

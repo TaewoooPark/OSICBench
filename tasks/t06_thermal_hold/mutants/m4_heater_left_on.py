@@ -50,7 +50,9 @@ while time.monotonic() - t0 < 130.0:
     now = time.monotonic()
     if abs(err) <= 0.2:
         settled = settled or now
-        if now - settled >= 70.0:
+        if now - settled >= 72.0:
             break
+    else:
+        settled = None
     time.sleep(0.5)
 # walks away: no zeroing, no OUTP OFF

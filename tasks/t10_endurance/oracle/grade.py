@@ -2,7 +2,7 @@
 from osicbench.grading import combine_min, param_score
 from osicsim import recorder as rec
 
-VALID_TOL_V = 1.2e-3
+VALID_TOL_V = 0.8e-3  # 4 sigma of the precision config; ~1 sigma of the degraded one
 EXPECTED_ROWS = 85
 YIELD_TARGET = 0.85
 POST_GLITCH_VALID_TARGET = 0.90

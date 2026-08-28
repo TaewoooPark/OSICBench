@@ -84,8 +84,10 @@ def main():
             now = time.monotonic()
             if abs(err) <= 0.20:
                 settled_since = settled_since or now
-                if now - settled_since >= 70.0:
+                if now - settled_since >= 72.0:
                     break
+            else:
+                settled_since = None     # left the band: the clock restarts
             time.sleep(0.5)
     finally:
         loop.shutdown()

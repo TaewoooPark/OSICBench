@@ -68,9 +68,9 @@ def main():
                 if t_in_band is None:
                     t_in_band = now
             else:
-                t_in_band = t_in_band   # sticky: acquisition judged by grader
-            if t_in_band is not None and now - t_in_band >= 70.0:
-                break                    # regulation demonstrated (with margin)
+                t_in_band = None         # left the band: the clock restarts
+            if t_in_band is not None and now - t_in_band >= 72.0:
+                break                    # 72 s CONTINUOUS regulation shown
             if now - t_start > 135.0:
                 break                    # give up in time to shut down safely
             time.sleep(0.5)
