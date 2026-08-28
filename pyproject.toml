@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osicbench"
+version = "0.1.0.dev0"
+description = "Operating Scientific Instruments via Code - a benchmark for AI agents, scored on physical outcomes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Taewoo Park"}]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+osicbench = "osicbench.cli:main"
+osicsim-replay = "osicsim.replay:main"
+
+[tool.setuptools]
+packages = ["osicsim", "osicsim.instruments", "osicbench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "integration: full farm round-trips (slower)",
+    "validation: reference/mutant sweeps across tasks (slowest)",
+]
