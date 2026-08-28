@@ -1,0 +1,18 @@
+# Local planning documents (not part of the public benchmark)
+PLAN.md
+notes/
+runs/
+.firecrawl/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+*.log
+.coverage
+htmlcov/
+dist/
+build/
