@@ -78,9 +78,44 @@ class SCPIDevice:
         self._error_overflowed = False
         self._esr = 0
         self.stuck: bool = False  # fault: measurements freeze at last value
+        self._stuck_cache: Dict[str, float] = {}
+        # Farm wiring (set via attach(); None-safe so units test standalone)
+        self.hub = None
+        self.recorder = None
+        self.rng = None
+        self.options: Dict[str, Any] = {}
+        self._last_msg_t = time.monotonic()
         self._register_common()
         self.build()
         self.power_on()
+
+    def attach(self, hub, recorder, rng, options: Optional[Dict[str, Any]] = None) -> None:
+        """Called by the farm after construction to wire physics access."""
+        self.hub = hub
+        self.recorder = recorder
+        self.rng = rng
+        self.options = dict(options or {})
+
+    def record_state(self, field: str, old: Any, new: Any) -> None:
+        if self.recorder is not None and old != new:
+            self.recorder.log_state(self.name, field, old, new)
+
+    def tick(self, now: float) -> None:
+        """Periodic hook from the farm sampler (watchdogs, timers)."""
+
+    def get_export(self, field: str) -> float:
+        """Live physical export pulled through the wiring hub."""
+        raise KeyError(f"{self.name}: no export {field!r}")
+
+    def gauss(self, sigma: float) -> float:
+        return self.rng.gauss(0.0, sigma) if (self.rng and sigma > 0) else 0.0
+
+    def maybe_stuck(self, key: str, value: float) -> float:
+        """Fault support: while stuck, repeat the last value per channel."""
+        if self.stuck and key in self._stuck_cache:
+            return self._stuck_cache[key]
+        self._stuck_cache[key] = value
+        return value
 
     # ------------------------------------------------------------------
     # Subclass surface
@@ -153,6 +188,7 @@ class SCPIDevice:
         Failed queries contribute NO response (client-side timeout), per
         real-instrument behavior. Failed writes are silent + queued.
         """
+        self._last_msg_t = time.monotonic()
         try:
             commands = scpi.parse_message(message)
         except scpi.ScpiParseError as exc:
