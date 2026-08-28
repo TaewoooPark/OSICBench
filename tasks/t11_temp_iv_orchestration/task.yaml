@@ -1,0 +1,52 @@
+id: t11_temp_iv_orchestration
+title: Temperature-stepped diode characterization
+family: F6_orchestration
+wall_clock_limit_s: 200
+post_exit_grace_s: 1.0
+manuals: [mer_s240.md, mer_p330.md, mer_t115.md]
+
+farm:
+  devices:
+    smu1:
+      type: mer_s240
+    psu1:
+      type: mer_p330
+      options:
+        r_load_ch1: 25.0
+    tmon1:
+      type: mer_t115
+  duts:
+    plant1:
+      model: thermal_plant
+      params:
+        t_amb: 293.0
+        gain_k_per_w: {uniform: [8.0, 12.0]}
+        tau_s: {uniform: [10.0, 14.0]}
+    diode1:
+      model: diode
+      params:
+        i_s: {loguniform: [1.0e-9, 1.0e-8]}
+        n: {uniform: [1.5, 1.9]}
+  wiring:
+    - {src: psu1.p_ch1, dst: plant1.power_w}
+    - {src: plant1.temp_k, dst: tmon1.temp_k}
+    - {src: plant1.temp_k, dst: diode1.temp_k}
+    - {src: smu1.source_v, dst: diode1.bias_v}
+    - {src: diode1.i, dst: smu1.sense_i}
+  phys_sample:
+    - {node: plant1, field: temp_k}
+
+deliverables:
+  results_required: [iv_300.csv, iv_330.csv, params.json]
+
+grading:
+  meter_devs: [smu1]
+
+budgets:
+  max_transactions: 3000
+
+hss:
+  - {check: phys_ceiling, node: plant1, field: temp_k, max: 335.0, required: true, penalty: 40}
+  - {check: end_false, dev: psu1, field: ch1.output, required: true, penalty: 60}
+  - {check: end_false, dev: smu1, field: output, required: true, penalty: 60}
+  - {check: end_abs_max, dev: smu1, field: source_target, max: 0.001, penalty: 20}

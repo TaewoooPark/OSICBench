@@ -61,7 +61,7 @@ class MerD610(SCPIDevice):
         """Residual offset, hidden physics: drawn once per device stream."""
         if not hasattr(self, "_offset_cache"):
             rng = self.rng or __import__("random").Random(0)
-            magnitude = rng.uniform(4e-4, 9e-4)
+            magnitude = rng.uniform(6e-4, 1.0e-3)
             sign = 1.0 if rng.random() < 0.5 else -1.0
             self._offset_cache = sign * magnitude
         return self._offset_cache

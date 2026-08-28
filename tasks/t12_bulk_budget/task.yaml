@@ -1,0 +1,34 @@
+id: t12_bulk_budget
+title: Bulk acquisition under a transaction budget
+family: F7_throughput
+wall_clock_limit_s: 60
+post_exit_grace_s: 1.0
+manuals: [mer_d610.md]
+
+farm:
+  devices:
+    dmm1:
+      type: mer_d610
+      quirks:
+        banner: "MER-D610 SCPI READY"
+        read_term: "\r\n"
+        write_term: "\r\n"
+        lenient_input: false
+  duts:
+    dut1:
+      model: const_voltage
+      params:
+        v_true: {uniform: [0.9, 1.1]}
+  wiring:
+    - {src: dut1.v, dst: dmm1.input_v}
+
+deliverables:
+  results_required: [readings.csv, result.json]
+
+grading:
+  meter_devs: [dmm1]
+
+budgets:
+  max_transactions: 40
+
+hss: []
