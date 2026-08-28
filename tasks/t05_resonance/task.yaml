@@ -1,0 +1,33 @@
+id: t05_resonance
+title: Resonance spectrum - center and quality factor
+family: F2_characterization
+wall_clock_limit_s: 90
+post_exit_grace_s: 1.0
+manuals: [mer_l820.md]
+
+farm:
+  devices:
+    l820:
+      type: mer_l820
+  duts:
+    dut1:
+      model: resonance
+      params:
+        f0: {uniform: [25000.0, 75000.0]}
+        gamma: {uniform: [300.0, 800.0]}
+        amp: {loguniform: [5.0e-6, 2.0e-5]}
+        drift_rate_hz_per_rt_s: 0.0
+  wiring:
+    - {src: l820.freq, dst: dut1.drive_f}
+    - {src: dut1.r, dst: l820.signal_r}
+
+deliverables:
+  results_required: [spectrum.csv, result.json]
+
+grading:
+  meter_devs: [l820]
+
+budgets:
+  max_transactions: 1400
+
+hss: []

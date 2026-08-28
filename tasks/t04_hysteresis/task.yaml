@@ -1,0 +1,44 @@
+id: t04_hysteresis
+title: Magnetic hysteresis loop - coercive field
+family: F2_characterization
+wall_clock_limit_s: 150
+post_exit_grace_s: 1.0
+manuals: [mer_s240.md, mer_d610.md]
+
+farm:
+  devices:
+    smu1:
+      type: mer_s240
+    dmm1:
+      type: mer_d610
+      quirks:
+        banner: "MER-D610 SCPI READY"
+        read_term: "\r\n"
+        write_term: "\r\n"
+        lenient_input: false
+  duts:
+    dut1:
+      model: hysteresis
+      params:
+        ms: {uniform: [0.5, 1.5]}
+        hc: {uniform: [15.0, 35.0]}      # millitesla
+        w: {uniform: [3.0, 6.0]}         # millitesla
+        h_off: {uniform: [-5.0, 5.0]}    # millitesla, loop offset
+        k_sens: 0.2                      # volts per unit magnetization
+  wiring:
+    - {src: smu1.source_i, dst: dut1.h, gain: 50.0}   # coil: 50 mT per ampere
+    - {src: dut1.v_m, dst: dmm1.input_v}
+
+deliverables:
+  results_required: [loop.csv, params.json]
+
+grading:
+  meter_devs: [dmm1]
+
+budgets:
+  max_transactions: 1200
+
+hss:
+  - {check: end_false, dev: smu1, field: output, required: true, penalty: 60}
+  - {check: end_abs_max, dev: smu1, field: source_target, max: 0.001, penalty: 20}
+  - {check: max_step, dev: smu1, field: source_target, limit: 0.105, penalty: 30}

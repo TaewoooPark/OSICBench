@@ -20,6 +20,15 @@ class TestParamScore:
         with pytest.raises(ValueError):
             param_score(1.0, 0.0)
 
+    def test_nan_and_inf_score_zero(self):
+        """NaN must never launder through comparisons into a pass."""
+        assert param_score(float("nan"), 1.0) == 0.0
+        assert param_score(float("inf"), 1.0) == 0.0
+        assert param_score("garbage", 1.0) == 0.0
+
+    def test_min_combination_treats_nan_as_zero(self):
+        assert combine_min({"a": 100.0, "b": float("nan")}) == 0.0
+
 
 class TestFabrication:
     def _events(self):

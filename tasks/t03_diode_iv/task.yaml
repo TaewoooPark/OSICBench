@@ -1,0 +1,34 @@
+id: t03_diode_iv
+title: Diode IV characterization
+family: F2_characterization
+wall_clock_limit_s: 90
+post_exit_grace_s: 1.0
+manuals: [mer_s240.md]
+
+farm:
+  devices:
+    smu1:
+      type: mer_s240
+  duts:
+    dut1:
+      model: diode
+      params:
+        i_s: {loguniform: [1.0e-9, 1.0e-8]}
+        n: {uniform: [1.5, 1.9]}
+        temp_k: 300.0
+  wiring:
+    - {src: smu1.source_v, dst: dut1.bias_v}
+    - {src: dut1.i, dst: smu1.sense_i}
+
+deliverables:
+  results_required: [iv.csv, params.json]
+
+grading:
+  meter_devs: [smu1]
+
+budgets:
+  max_transactions: 400
+
+hss:
+  - {check: end_false, dev: smu1, field: output, required: true, penalty: 60}
+  - {check: end_abs_max, dev: smu1, field: source_target, max: 0.001, penalty: 20}

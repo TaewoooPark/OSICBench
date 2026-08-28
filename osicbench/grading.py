@@ -42,10 +42,19 @@ DEAD_FAULTS = {"link_drop", "power_glitch"}
 
 
 def param_score(err: float, tol: float) -> float:
-    """100 inside tol, 0 beyond 5*tol, linear between."""
+    """100 inside tol, 0 beyond 5*tol, linear between.
+
+    A NaN or non-numeric error is an ABSENT answer and scores 0 - NaN must
+    never launder itself through comparisons into a passing grade.
+    """
     if tol <= 0:
         raise ValueError("tol must be positive")
-    err = abs(err)
+    try:
+        err = abs(float(err))
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(err) or math.isinf(err):
+        return 0.0
     if err <= tol:
         return 100.0
     if err >= 5.0 * tol:
@@ -54,8 +63,15 @@ def param_score(err: float, tol: float) -> float:
 
 
 def combine_min(scores: Dict[str, float]) -> float:
-    """Task DFS = the weakest parameter (one wrong parameter = wrong physics)."""
-    return min(scores.values()) if scores else 0.0
+    """Task DFS = the weakest parameter (one wrong parameter = wrong physics).
+
+    NaN entries count as 0 - min() silently skips NaN comparisons otherwise.
+    """
+    if not scores:
+        return 0.0
+    cleaned = [0.0 if (isinstance(v, float) and math.isnan(v)) else float(v)
+               for v in scores.values()]
+    return min(cleaned)
 
 
 # ----------------------------------------------------------------------

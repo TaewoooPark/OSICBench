@@ -178,12 +178,13 @@ class DiodeDUT(DUT):
 
 
 class HysteresisDUT(DUT):
-    """Branch-switching magnetization model. Params: ms, hc, w, k_sens.
+    """Branch-switching magnetization model. Params: ms, hc, w, k_sens,
+    h_off (exchange-bias-like loop offset, default 0).
 
     Input: h (applied field, arbitrary units). Output: sensor voltage
     v_m = k_sens * M(h, branch). The branch flips when the sweep direction
-    reverses - single measurements cannot reveal the loop; only a full
-    up-and-down sweep recovers hc.
+    reverses; the loop is centered on h_off. A single branch confounds
+    h_off with hc - only a full up-and-down sweep separates them.
     """
 
     def __init__(self, name, params, rng):
@@ -199,7 +200,8 @@ class HysteresisDUT(DUT):
                 self._direction = +1.0
         self._last_h = h
         hc = self.params["hc"] * (1.0 if self._direction > 0 else -1.0)
-        return self.params["ms"] * math.tanh((h - hc) / self.params["w"])
+        h_off = self.params.get("h_off", 0.0)
+        return self.params["ms"] * math.tanh((h - h_off - hc) / self.params["w"])
 
     def output(self, field: str, now: Optional[float] = None) -> float:
         if field == "v_m":
