@@ -26,7 +26,9 @@ true stage temperature and the recorded supply state.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: `psu1` (heater supply), `tmon1` (thermometer).
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  `psu1` (heater supply), `tmon1` (thermometer).
 - Manuals: `manuals/mer_p330.md`, `manuals/mer_t115.md`.
 
 ## Notes

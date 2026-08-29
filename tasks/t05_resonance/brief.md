@@ -23,7 +23,9 @@ returns, and how long the output filter needs after any change.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: the lock-in is `l820`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the lock-in is `l820`.
 - `OSIC_RESULTS_DIR`: deliverables directory.
 - Instrument manual: `manuals/mer_l820.md`.
 

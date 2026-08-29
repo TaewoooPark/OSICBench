@@ -18,7 +18,9 @@ make sure the points you fit are real measurements, not clamped ones.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: device endpoints; the SMU is `smu1`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the SMU is `smu1`.
 - `OSIC_RESULTS_DIR`: deliverables directory.
 - Instrument manual: `manuals/mer_s240.md`.
 

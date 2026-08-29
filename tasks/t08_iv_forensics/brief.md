@@ -23,7 +23,9 @@ Same contract as the rig: sweep 0.30-0.55 V (steps <= 0.02 V) and deliver
 
 ## Environment contract
 
-`OSIC_ENDPOINTS` (SMU is `smu1`), `OSIC_RESULTS_DIR`. 90 s hard ceiling.
+`OSIC_ENDPOINTS` (path to a JSON file,
+`{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+the SMU is `smu1`), `OSIC_RESULTS_DIR`. 90 s hard ceiling.
 Hardware-state grading: source zeroed and output off at exit.
 - Record measured values exactly as parsed from the instrument (full
   float precision); they are reconciled against the readings it

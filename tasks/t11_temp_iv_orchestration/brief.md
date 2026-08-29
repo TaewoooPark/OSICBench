@@ -30,7 +30,9 @@ not forgive scheduling shortcuts.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: `smu1`, `psu1`, `tmon1`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  `smu1`, `psu1`, `tmon1`.
 - `OSIC_RESULTS_DIR`: deliverables directory.
 
 ## Deliverables

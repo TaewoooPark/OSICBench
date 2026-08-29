@@ -60,6 +60,24 @@ the brief allows to be post-processed), and only when the reference
 solutions write full precision - a `%.3f` in a reference will fail its
 own reconciliation.
 
+## Environment contract (every brief, verbatim shape)
+
+Mode A agents write their endpoint parser blind - the farm is down while
+they author, so they can never inspect `endpoints.json` before committing
+to a format. A brief that names the devices but not the format therefore
+makes the agent guess path-vs-inline JSON, and that guess decides the
+task. Every brief must state both, e.g.
+
+```
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the SMU is `smu1`.
+```
+
+References are written by the task author, who already knows the
+contract, so `osicbench validate` cannot catch an unstated one. Check it
+by reading the brief as if it were the only thing you had.
+
 ## Fault fairness
 
 Every environment behavior that decides pass/fail must be announced in

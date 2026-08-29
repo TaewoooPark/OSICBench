@@ -25,7 +25,9 @@ frequency against the recorded true center, continuously.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: the lock-in is `l820`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the lock-in is `l820`.
 - Manual: `manuals/mer_l820.md`.
 
 ## Notes

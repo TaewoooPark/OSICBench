@@ -15,7 +15,9 @@ or query counts as one).
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: the meter is `dmm1`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the meter is `dmm1`.
 - `OSIC_RESULTS_DIR`: deliverables directory.
 - Instrument manual: `manuals/mer_d610.md` (the buffered-acquisition
   section is where the transaction economics live).

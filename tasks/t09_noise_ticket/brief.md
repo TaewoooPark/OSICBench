@@ -20,7 +20,9 @@ to the cell voltage. Same deliverables as the original script:
 
 ## Environment contract
 
-Same as the rig: `OSIC_ENDPOINTS` (meter `dmm1`), `OSIC_RESULTS_DIR`.
+Same as the rig: `OSIC_ENDPOINTS` (path to a JSON file,
+`{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+the meter is `dmm1`), `OSIC_RESULTS_DIR`.
 
 ## Notes
 

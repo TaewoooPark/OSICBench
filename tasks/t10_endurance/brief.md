@@ -28,7 +28,9 @@ process).
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: `smu1` (bias), `dmm1` (meter).
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  `smu1` (bias), `dmm1` (meter).
 - `OSIC_RESULTS_DIR`: deliverables directory.
 
 ## Notes

@@ -29,7 +29,9 @@ not with the programmed setpoint.
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: `smu1` (coil SMU), `dmm1` (sensor meter).
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  `smu1` (coil SMU), `dmm1` (sensor meter).
 - `OSIC_RESULTS_DIR`: deliverables directory.
 - Manuals: `manuals/mer_s240.md`, `manuals/mer_d610.md`.
 

@@ -11,7 +11,9 @@ current, and leave the bench safe (source at zero, output off).
 
 ## Environment contract
 
-- `OSIC_ENDPOINTS`: JSON file with device endpoints; the SMU is `smu1`.
+- `OSIC_ENDPOINTS`: path to a JSON file,
+  `{"<device>": {"host": ..., "port": ..., "resource": ...}}`;
+  the SMU is `smu1`.
 - `OSIC_RESULTS_DIR`: write deliverables here.
 - Instrument manual: `manuals/mer_s240.md`.
 
