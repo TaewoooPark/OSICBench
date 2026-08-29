@@ -83,7 +83,12 @@ the bias supply produces invalid data, and the record must span the
 required observation window); the two-temperature diode task requires
 the stage's recorded temperature to have reached and held BOTH setpoints,
 and expects the band-gap-activated saturation current that only data
-taken at that temperature can produce.
+taken at that temperature can produce. Where a noise spec is judged from
+a small sample (first light: 10 readings), the sample statistic is
+paired with a deterministic bound derived from the integration state the
+meter actually served the readings in - a 10-sample std of power-on-NPLC
+noise dips under the spec on a few percent of seeds, and estimator luck
+must not grade an out-of-spec configuration as in-spec.
 
 ## Pass rule
 

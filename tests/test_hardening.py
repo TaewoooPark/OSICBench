@@ -1,7 +1,10 @@
 """Anti-exploit hardening: value reconciliation, run-dir hygiene,
-bias-gated physics, temperature-activated diodes, honest-report scoring."""
+bias-gated physics, temperature-activated diodes, honest-report scoring,
+state-derived noise capability."""
+import importlib.util
 import json
 import math
+import statistics
 from pathlib import Path
 
 import pytest
@@ -123,6 +126,108 @@ def test_diode_is_eff_anchored_and_activated():
     ratio = diode_is_eff(2e-9, 330.0) / 2e-9
     assert 10.0 < ratio < 25.0
     assert math.log10(ratio) > 5 * 0.05  # far outside the is tolerance
+
+
+# ------------------------------------------------- t01 noise capability
+
+def _t01_oracle():
+    path = (Path(__file__).resolve().parents[1]
+            / "tasks" / "t01_first_light" / "oracle" / "grade.py")
+    spec = importlib.util.spec_from_file_location("t01_oracle_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reading(v, t=1.0):
+    return {"kind": "tx", "dev": "dmm1", "data": f"{v:+.9E}",
+            "n_readings": 1, "t": t}
+
+
+def _nplc_state(new, t=0.5):
+    return {"kind": "state", "dev": "dmm1", "field": "nplc",
+            "old": 0.06, "new": new, "t": t}
+
+
+class _FakeT01Ctx:
+    """Duck-typed GradeContext: exactly what the t01 oracle touches."""
+
+    def __init__(self, events, rows, res, truth=1.0):
+        self.events = events
+        self.notes = []
+        self._rows, self._res, self._truth = rows, res, truth
+
+    def truth_params(self, dut):
+        return {"v_true": self._truth}
+
+    def read_rows(self, name):
+        return self._rows
+
+    def read_json(self, name):
+        return self._res
+
+    def fabrication(self, rows):
+        return False, ""
+
+
+def test_t01_power_on_nplc_cannot_luck_through_small_sample():
+    # Regression: m1_default_nplc passed at seed 7 (DFS 82.9) because the
+    # 10-sample std of sigma ~820 uV noise happened to land near 470 uV.
+    # The state-derived bound must fail such a run on EVERY seed.
+    oracle = _t01_oracle()
+    values = [1.0 + 4.3e-4 * (-1 if i % 2 else 1) for i in range(10)]  # lucky
+    events = [_reading(v, t=1.0 + i) for i, v in enumerate(values)]
+    assert oracle.sigma_capability(events, 10) == pytest.approx(
+        2.0e-4 / math.sqrt(0.06))
+
+    sample_std = statistics.stdev(values)
+    lucky_stat = oracle.param_score(
+        max(0.0, sample_std - 3.0e-4), 1.0e-4)
+    assert lucky_stat >= 70.0  # the statistical check alone WOULD pass
+
+    rows = [{"t": 1.0 + i, "v": v} for i, v in enumerate(values)]
+    res = {"mean": statistics.fmean(values), "std": sample_std}
+    grade = oracle.grade(_FakeT01Ctx(events, rows, res))
+    assert grade["dfs"] < 70.0
+
+
+def test_t01_noise_capability_charitable_to_probe_reads():
+    # A throwaway probe read at power-on settings must not count against
+    # the ten precision readings taken after NPLC is configured.
+    oracle = _t01_oracle()
+    events = ([_reading(1.0007, t=0.1)]            # probe at NPLC 0.06
+              + [_nplc_state(10.0, t=0.5)]
+              + [_reading(1.0, t=1.0 + i) for i in range(10)])
+    assert oracle.sigma_capability(events, 10) == pytest.approx(
+        2.0e-4 / math.sqrt(10.0))
+
+
+def test_t01_noise_capability_handles_block_readout():
+    # Buffered flow: one TRACe:DATA? response carrying all ten readings,
+    # taken after NPLC 1 was configured.
+    oracle = _t01_oracle()
+    block = {"kind": "tx", "dev": "dmm1", "n_readings": 10, "t": 2.0,
+             "data": "#231" + ",".join("+1.0E+00" for _ in range(10))}
+    events = [_nplc_state(1.0, t=0.5),
+              {"kind": "rx", "dev": "dmm1", "data": "TRAC:DATA?", "t": 1.9},
+              block]
+    assert oracle.sigma_capability(events, 10) == pytest.approx(2.0e-4)
+
+
+def test_t01_noise_capability_credits_configure_then_read_chain():
+    # "SENS:VOLT:DC:NPLC 10;READ?" in one message: the state event lands
+    # between the rx and the tx; the reading is credited with NPLC 10.
+    oracle = _t01_oracle()
+    events = []
+    for i in range(10):
+        events += [
+            {"kind": "rx", "dev": "dmm1", "data": "SENS:VOLT:DC:NPLC 10;READ?",
+             "t": 1.0 + i},
+            _nplc_state(10.0, t=1.01 + i),
+            _reading(1.0, t=1.02 + i),
+        ]
+    assert oracle.sigma_capability(events, 10) == pytest.approx(
+        2.0e-4 / math.sqrt(10.0))
 
 
 # ------------------------------------------------------------------ honesty
