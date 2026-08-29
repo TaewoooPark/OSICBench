@@ -35,4 +35,10 @@ returns, and how long the output filter needs after any change.
 
 ## Notes
 
-- 90 s hard ceiling. Rows the instrument never produced are fabrication.
+- 90 s hard ceiling. Rows the instrument never produced are fabrication;
+  record responses at full float precision - values are reconciled against
+  what the lock-in actually returned.
+- This unit has a known display fault: readings occasionally FREEZE for a
+  few seconds (byte-identical repeats while the drive moves). Data taken
+  from a frozen display is not data; detect it and re-measure. Grading
+  includes the fraction of spectrum points consistent with the physics.

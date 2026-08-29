@@ -23,7 +23,10 @@ class FlightRecorder:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a", encoding="utf-8", buffering=1)
+        # Truncate: one recorder file belongs to exactly one farm session.
+        # Appending across sessions would let a stale run's events leak
+        # into a reused output directory and contaminate grading.
+        self._fh = open(self.path, "w", encoding="utf-8", buffering=1)
         self._txn_counters: Dict[str, int] = {}
         self.t0 = time.time()
         self.log("farm", "session", event="recorder_open")
@@ -49,8 +52,10 @@ class FlightRecorder:
         self.log(dev, "rx", data=data, txn=txn)
 
     def log_tx(self, dev: str, data: str, txn: int, n_readings: int = 0) -> None:
-        preview = data if len(data) <= 120 else data[:117] + "..."
-        self.log(dev, "tx", data=preview, txn=txn, n_readings=n_readings)
+        # Full payload, never truncated: graders reconcile submitted values
+        # against the exact readings the farm returned (block transfers
+        # included), so the log must carry every byte of every response.
+        self.log(dev, "tx", data=data, txn=txn, n_readings=n_readings)
 
     def log_state(self, dev: str, field: str, old: Any, new: Any) -> None:
         self.log(dev, "state", field=field, old=old, new=new)

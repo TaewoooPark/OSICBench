@@ -2,7 +2,9 @@
 
 The same reference-cell bench as a routine monitor job, but this time the
 controller link is shared and slow: your run is only allowed a small
-number of bus transactions.
+number of bus transactions. The link is also known to DROP for a few
+seconds at a time - reconnect and carry on; the meter keeps its state and
+any buffered acquisition keeps running through the outage.
 
 ## Goal
 
@@ -28,3 +30,7 @@ or query counts as one).
 
 - 60 s hard ceiling. Exceeding the transaction budget fails the run
   regardless of data quality. Fabricated rows zero the task.
+- Record readings exactly as parsed from the instrument (full float
+  precision). Submitted values are reconciled against the readings the
+  instruments actually returned; heavy rounding fails that check.
+- Grading includes how promptly the bus is back in use after the drop.

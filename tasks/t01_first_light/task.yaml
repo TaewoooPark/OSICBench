@@ -29,6 +29,7 @@ deliverables:
 
 grading:
   meter_devs: [dmm1]
+  value_cols: [v]
 
 budgets:
   max_transactions: 80

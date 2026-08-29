@@ -48,6 +48,19 @@ def main():
     smu.sendall(b"*OPC?" + LF)
     readline(smu, LF)
 
+    def feed_watchdog():
+        # Keepalive AND bias health: if the watchdog ever tripped (e.g. we
+        # went quiet while the meter link was down), put the bias back.
+        try:
+            smu.sendall(b"OUTP?" + LF)
+            if readline(smu, LF).strip() == "0":
+                smu.sendall(b"SOUR:VOLT 0.5" + LF)
+                smu.sendall(b"OUTP ON" + LF)
+                smu.sendall(b"*OPC?" + LF)
+                readline(smu, LF)
+        except OSError:
+            pass
+
     dmm = connect_dmm(eps["dmm1"])
     log = open(os.path.join(out, "monitor.csv"), "w", buffering=1)
     log.write("t,v\n")
@@ -66,6 +79,7 @@ def main():
             except OSError:
                 pass
             while time.monotonic() - t_start < 118.0:
+                feed_watchdog()                      # never starve it here
                 try:
                     dmm = connect_dmm(eps["dmm1"])   # reconnect + re-assert
                     break
@@ -73,12 +87,8 @@ def main():
                     time.sleep(1.0)
         now = time.monotonic()
         if now - last_keepalive > 2.0:
-            try:
-                smu.sendall(b"OUTP?" + LF)           # feed the watchdog
-                readline(smu, LF)
-                last_keepalive = now
-            except OSError:
-                pass
+            feed_watchdog()
+            last_keepalive = now
         time.sleep(max(0.0, 1.0 - (time.monotonic() - cycle_started)))
 
     # normal exit path: shut the bias down explicitly

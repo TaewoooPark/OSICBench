@@ -20,12 +20,15 @@ farm:
   wiring:
     - {src: l820.freq, dst: dut1.drive_f}
     - {src: dut1.r, dst: l820.signal_r}
+  faults:
+    - {kind: stuck_value, dev: l820, after_txn: 640, duration_s: 5.0}
 
 deliverables:
   results_required: [spectrum.csv, result.json]
 
 grading:
   meter_devs: [l820]
+  value_cols: [r]
 
 budgets:
   max_transactions: 1400

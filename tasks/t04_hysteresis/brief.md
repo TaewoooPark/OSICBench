@@ -45,3 +45,6 @@ not with the programmed setpoint.
 - 150 s hard ceiling.
 - Hardware-state grading: current-step limit respected throughout, source
   ramped to zero and output off at exit.
+- Record measured values exactly as parsed from the instrument (full
+  float precision); they are reconciled against the readings it
+  actually returned.

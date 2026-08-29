@@ -30,10 +30,27 @@ grader change that stops catching a mutant fails validation.
 ## Fabrication reconciliation
 
 Data volume is bounded by what the instruments actually served (per-
-response reading accounting, block transfers counted correctly), and
-timestamps are checked against recorded outage windows. Interpolating
-across an outage or duplicating a sweep file exceeds the physical reading
-budget and is flagged.
+response reading accounting, block transfers counted correctly),
+timestamps are checked against recorded outage windows, and - for tasks
+that declare raw-reading columns - submitted VALUES are matched against
+the exact readings the instruments returned. Interpolating across an
+outage, duplicating a sweep file, or substituting cleaner numbers than
+the bench produced all fail reconciliation.
+
+## Hidden-state isolation
+
+The farm writes its flight recorder (which carries the seeded ground
+truth) into a private temporary directory outside the run tree; the
+submission receives only a copy of `endpoints.json` (host/port/resource)
+and its results directory. Farm files are collected into the run tree
+only after the farm stops. This is deliberate separation, not an OS
+security boundary: submissions run as the same user, and a determined
+process can hunt the filesystem. Two backstops make that unprofitable:
+value reconciliation flags ground-truth substitution regardless of how
+the truth was obtained, and adversarial evaluations should run each
+submission in a container (see `adapters/`). Run directories are
+single-use - the runner refuses a non-empty output directory - so stale
+artifacts can never grade a fresh submission.
 
 ## Time discipline
 
@@ -54,4 +71,22 @@ host speed.
   require a VISA layer can still participate (the endpoints are standard
   socket resources), but no VISA backend ships with the bench.
 - The sandbox provides process isolation, budgets, and kill semantics -
-  not a network jail. Submissions are trusted not to attack the host.
+  not a network jail. Submissions are trusted not to attack the host;
+  same-user filesystem separation of hidden state is best-effort (see
+  "Hidden-state isolation"). Container-per-submission is the setting for
+  adversarial evaluation.
+- Subset selection is not detected: an agent that takes more readings
+  than it submits and keeps the prettiest REAL ones passes reconciliation
+  (every submitted value is genuine). Transaction budgets bound how much
+  selection pressure is available; statistics graded from the submitted
+  rows bound what selection can win.
+- The harness relies on POSIX process semantics (process groups,
+  SIGKILL); Linux and macOS are supported hosts. Windows is not.
+- Mutants are authored by the task authors. The validation gate proves
+  the graders catch the failure modes we thought of; the three-reference
+  rule (two idioms plus one materially different measurement strategy on
+  statistics-sensitive tasks) is the guard against tolerances tuned to a
+  single canonical solution.
+- Instrument manuals are short (60-150 lines). They model "the facts are
+  in the manual and the manual is right" - not the real-world skill of
+  mining a 500-page vendor PDF for the one paragraph that matters.

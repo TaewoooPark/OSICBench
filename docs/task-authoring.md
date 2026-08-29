@@ -50,6 +50,24 @@ harness from `task.yaml`.
 Scoring style: use `param_score(err, tol)` and `combine_min` - and write a
 one-line comment justifying every tolerance.
 
+## Raw-value reconciliation
+
+If the deliverable rows are raw instrument readings, declare the columns
+in `task.yaml` under `grading.value_cols` and state in the brief that
+readings must be recorded at full float precision. Only do this for
+columns that ARE raw readings (never for programmed setpoints or values
+the brief allows to be post-processed), and only when the reference
+solutions write full precision - a `%.3f` in a reference will fail its
+own reconciliation.
+
+## Fault fairness
+
+Every environment behavior that decides pass/fail must be announced in
+the brief or the manual (the announcement can be qualitative - "the link
+drops", "the display freezes" - the timing stays hidden). A fault the
+references cannot survive is a task bug: the validation gate requires
+references to pass WITH the fault schedule active.
+
 ## Validation gate (mandatory before merging a task)
 
 ```

@@ -13,9 +13,14 @@ submission's source code.
     IE   efficiency      - bus transactions (deterministic) + wall time.
 
 Fabrication: for tasks that require raw data, submitted rows are
-reconciled against the per-response reading totals the farm actually
-returned (a block transfer counts as its N readings), and against fault
-windows when rows carry timestamps. Fabricated data zeroes DFS.
+reconciled against the farm's flight recorder three ways: row counts
+against per-response reading totals (a block transfer counts as its N
+readings), timestamps against outage windows, and - where the task names
+raw-reading columns - the submitted VALUES against the exact readings the
+instruments returned. A value the instrument never produced (including a
+value copied from hidden ground truth, which differs from any returned
+reading by at least the measurement noise) is fabrication and zeroes the
+task.
 """
 from __future__ import annotations
 
@@ -150,11 +155,81 @@ def _run_rule(check: str, rule: dict, events: List[dict], snapshot: dict) -> Tup
 # ----------------------------------------------------------------------
 
 
+VALUE_MATCH_REL_TOL = 1e-6
+VALUE_MATCH_ABS_TOL = 1e-9
+VALUE_UNMATCHED_FRAC_MAX = 0.02
+
+
+def returned_values(events: List[dict], devs: set) -> List[float]:
+    """Every numeric reading the named instruments actually returned.
+
+    Only responses that carried measurement readings (n_readings >= 1)
+    contribute; status and configuration echoes never enter the pool, so a
+    submitted value cannot "match" an unrelated 0/1 status reply. Block
+    payloads (#<n><len>...) are unframed; semicolon-chained responses and
+    comma-separated buffers are split into individual readings.
+    """
+    out: List[float] = []
+    for e in events:
+        if e.get("kind") != "tx" or e.get("dev") not in devs:
+            continue
+        if int(e.get("n_readings", 0) or 0) < 1:
+            continue
+        payload = str(e.get("data", ""))
+        for part in payload.split(";"):
+            part = part.strip()
+            if part.startswith("#") and len(part) >= 2 and part[1].isdigit():
+                ndig = int(part[1])
+                part = part[2 + ndig:]
+            for token in part.split(","):
+                try:
+                    out.append(float(token))
+                except ValueError:
+                    continue
+    return out
+
+
+def reconcile_values(
+    submitted: List[float],
+    returned: List[float],
+    rel_tol: float = VALUE_MATCH_REL_TOL,
+    abs_tol: float = VALUE_MATCH_ABS_TOL,
+) -> Tuple[int, int]:
+    """Greedy multiset match of submitted readings against returned ones.
+
+    Each returned reading can vouch for at most one submitted value
+    (duplicated rows must be backed by duplicated responses). Returns
+    (n_matched, n_unmatched). Tolerance covers honest re-formatting of a
+    parsed float; it is orders of magnitude tighter than measurement
+    noise, so values substituted from ground truth do not match.
+    """
+    pool = sorted(returned)
+    used = [False] * len(pool)
+    matched = 0
+    for v in submitted:
+        if math.isnan(v) or math.isinf(v):
+            continue  # sentinels/NaN are judged by the task oracle, not here
+        tol = max(abs_tol, rel_tol * abs(v))
+        best_j, best_err = -1, tol
+        for j, r in enumerate(pool):
+            if used[j]:
+                continue
+            err = abs(r - v)
+            if err <= best_err:
+                best_j, best_err = j, err
+        if best_j >= 0:
+            used[best_j] = True
+            matched += 1
+    finite = sum(1 for v in submitted if not (math.isnan(v) or math.isinf(v)))
+    return matched, finite - matched
+
+
 def fabrication_check(
     rows: List[dict],
     events: List[dict],
     meter_devs: List[str],
     time_key: str = "t",
+    value_cols: Optional[Tuple[str, ...]] = None,
 ) -> Tuple[bool, str]:
     """Returns (fabricated, reason)."""
     total = rec.total_readings(events, devs=set(meter_devs))
@@ -170,6 +245,22 @@ def fabrication_check(
             for t0, t1, name in windows:
                 if t0 + FAULT_WINDOW_GUARD_S < t < t1 - FAULT_WINDOW_GUARD_S:
                     return True, f"row at t={t:.3f} inside {name} outage [{t0:.3f},{t1:.3f}]"
+    if value_cols:
+        submitted: List[float] = []
+        for row in rows:
+            for col in value_cols:
+                try:
+                    submitted.append(float(row[col]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+        if submitted:
+            pool = returned_values(events, set(meter_devs))
+            matched, unmatched = reconcile_values(submitted, pool)
+            if unmatched > max(1, int(VALUE_UNMATCHED_FRAC_MAX * len(submitted))):
+                return True, (
+                    f"{unmatched}/{len(submitted)} submitted readings match no "
+                    f"reading the instruments returned"
+                )
     return False, ""
 
 
@@ -237,11 +328,17 @@ class GradeContext:
 
     # -- checks --------------------------------------------------------------
 
-    def fabrication(self, rows: List[dict]) -> Tuple[bool, str]:
+    def fabrication(
+        self, rows: List[dict], value_cols: Optional[Tuple[str, ...]] = None
+    ) -> Tuple[bool, str]:
         meters = self.task.grading_cfg.get("meter_devs") or list(
             self.task.config["farm"]["devices"].keys()
         )
-        fab, reason = fabrication_check(rows, self.events, meters)
+        if value_cols is None:
+            cfg_cols = self.task.grading_cfg.get("value_cols")
+            value_cols = tuple(cfg_cols) if cfg_cols else None
+        fab, reason = fabrication_check(rows, self.events, meters,
+                                        value_cols=value_cols)
         if fab:
             self.notes.append(f"FABRICATION: {reason}")
         return fab, reason

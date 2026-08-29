@@ -40,6 +40,13 @@ class LockIn:
         self._w(f"SOUR:FREQ {freq:.1f}")
         time.sleep(self.SETTLE_MULT * self.tau)
         r = float(self._q("OUTP? 3"))
+        # Frozen-display defense: byte-identical repeats across points.
+        t_retry = time.monotonic()
+        while r == getattr(self, "_last_raw", None) and \
+                time.monotonic() - t_retry < 8.0:
+            time.sleep(0.4)
+            r = float(self._q("OUTP? 3"))
+        self._last_raw = r
         if r > 1e30:
             raise RuntimeError("overload sentinel - back off sensitivity")
         return r

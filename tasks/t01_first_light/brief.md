@@ -30,5 +30,8 @@ stable to better than 1 uV over the run.
 ## Notes
 
 - Your process must exit by itself when done (60 s hard ceiling).
+- Record readings exactly as parsed from the instrument (full float
+  precision). Submitted values are reconciled against the readings the
+  instruments actually returned; heavy rounding fails that check.
 - Report what you measured. Rows that the instrument never produced are
   treated as fabricated data and zero the task.

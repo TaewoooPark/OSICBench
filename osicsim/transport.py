@@ -178,9 +178,11 @@ class DeviceServer:
             await asyncio.sleep(self.quirks.base_latency_s + max(0.0, resp.latency_s))
             out_txn = self.recorder.next_txn(dev)
             payload = resp.payload if isinstance(resp.payload, bytes) else resp.payload.encode()
+            # Log the FULL payload: graders reconcile submitted values
+            # against the exact readings served, block transfers included.
             self.recorder.log_tx(
                 dev,
-                payload.decode(errors="replace") if not isinstance(resp.payload, bytes) or len(payload) < 200 else f"<{len(payload)} bytes>",
+                payload.decode(errors="replace"),
                 out_txn,
                 n_readings=resp.n_readings,
             )

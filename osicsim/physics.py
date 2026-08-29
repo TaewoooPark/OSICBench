@@ -122,7 +122,12 @@ class ConstVoltageDUT(DUT):
 class RampVoltageDUT(DUT):
     """A slowly drifting DC voltage (endurance monitoring target).
 
-    Params: v0, slope_v_per_s. Ground truth at any time is exact.
+    Params: v0, slope_v_per_s, bias_threshold_v. Ground truth at any time
+    is exact. When a ``bias_v`` input is wired, the cell only produces its
+    output while adequately biased - an unbiased cell reads back ~0 V, so
+    "data" taken without operating the bias supply is physically wrong,
+    not merely against the rules. ``v_int`` is the intrinsic (always-on)
+    value the grader uses as ground truth.
     """
 
     def __init__(self, name, params, rng):
@@ -133,13 +138,20 @@ class RampVoltageDUT(DUT):
         now = time.monotonic() if now is None else now
         return self.params["v0"] + self.params["slope_v_per_s"] * (now - self.t0)
 
+    def _biased(self) -> bool:
+        if "bias_v" not in self._inputs:
+            return True
+        return self.input("bias_v") >= self.params.get("bias_threshold_v", 0.45)
+
     def output(self, field: str, now: Optional[float] = None) -> float:
-        if field == "v":
+        if field == "v_int":
             return self.v_at(now)
+        if field == "v":
+            return self.v_at(now) if self._biased() else 0.0
         raise KeyError(field)
 
     def sample_fields(self) -> Dict[str, float]:
-        return {"v": self.v_at()}
+        return {"v": self.output("v"), "v_int": self.v_at()}
 
 
 class ResistorDUT(DUT):
@@ -158,17 +170,37 @@ class ResistorDUT(DUT):
         raise KeyError(field)
 
 
-class DiodeDUT(DUT):
-    """Shockley diode. Params: i_s, n, temp_k (temp may be wired live).
+DIODE_T_REF_K = 300.0
+DIODE_EG_EV = 0.72
+K_B_EV = 8.617333262e-5
 
-    Input: bias_v (from a voltage source). Output: i.
+
+def diode_is_eff(i_s_ref: float, temp_k: float) -> float:
+    """Temperature-activated saturation current, anchored at 300 K.
+
+    Is(T) = Is(300K) * (T/300)^2 * exp(Eg/k * (1/300 - 1/T)). At 300 K the
+    factor is exactly 1, so fixed-temperature diode tasks are unaffected;
+    at 330 K it is roughly 15x. Graders import THIS function to derive the
+    expected per-temperature saturation current - data acquired at one
+    temperature cannot masquerade as the other.
+    """
+    ratio = temp_k / DIODE_T_REF_K
+    activation = (DIODE_EG_EV / K_B_EV) * (1.0 / DIODE_T_REF_K - 1.0 / temp_k)
+    return i_s_ref * ratio * ratio * math.exp(activation)
+
+
+class DiodeDUT(DUT):
+    """Shockley diode. Params: i_s (at 300 K), n, temp_k (may be wired).
+
+    Input: bias_v (from a voltage source). Output: i. The saturation
+    current is band-gap activated - see ``diode_is_eff``.
     """
 
     def current(self, v: float, temp_k: float) -> float:
-        vt = 8.617333262e-5 * temp_k  # kT/q in volts
+        vt = K_B_EV * temp_k  # kT/q in volts
         x = v / (self.params["n"] * vt)
         x = min(x, 120.0)  # numeric guard
-        return self.params["i_s"] * (math.exp(x) - 1.0)
+        return diode_is_eff(self.params["i_s"], temp_k) * (math.exp(x) - 1.0)
 
     def output(self, field: str, now: Optional[float] = None) -> float:
         if field == "i":

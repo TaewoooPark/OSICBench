@@ -25,6 +25,7 @@ deliverables:
 
 grading:
   meter_devs: [smu1]
+  value_cols: [i]
 
 budgets:
   max_transactions: 400

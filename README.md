@@ -33,8 +33,11 @@ osicbench report --runs runs/ --out reports/
 osicsim-replay runs/demo/farm/recorder.jsonl
 ```
 
-Requirements: Python 3.10+, PyYAML. No VISA stack, no GUI — instruments
-are TCP endpoints (`TCPIP0::127.0.0.1::<port>::SOCKET`).
+Requirements: Python 3.10+, PyYAML, a POSIX host (Linux/macOS). No VISA
+stack, no GUI — instruments are TCP endpoints
+(`TCPIP0::127.0.0.1::<port>::SOCKET`). Hidden ground truth stays in a
+farm-private directory during a run; submissions see only endpoints and
+their results directory.
 
 ## The tasks (v0.1: 12)
 
@@ -54,7 +57,10 @@ are TCP endpoints (`TCPIP0::127.0.0.1::<port>::SOCKET`).
 | t12_bulk_budget | Throughput | 400 precision readings under a 40-transaction budget |
 
 Every task ships **reference solutions in two different idioms** (all must
-pass) and **4+ mutants** embodying classic field mistakes (all must fail).
+pass) — statistics-sensitive tasks add a **third reference with a
+materially different measurement strategy** — and **4-5 mutants**
+embodying classic field mistakes and known grader exploits (all must
+fail).
 `osicbench validate` enforces both, across seeds — the benchmark grades its
 own graders.
 
@@ -81,9 +87,11 @@ flight recorder:
 - **RS — Robustness.** Under the fault schedule: how much valid data
   survived, and did the run resume promptly? Submitted rows are reconciled
   against the per-response reading totals the instruments actually
-  returned (a block transfer counts as its N readings) and against outage
-  windows — excess or gap-filling rows are **fabrication** and zero the
-  task.
+  returned (a block transfer counts as its N readings), against outage
+  windows, and — where tasks declare raw-reading columns — against the
+  exact reading VALUES the instruments served. Excess rows, gap-filling
+  rows, and numbers the bench never produced are **fabrication** and zero
+  the task.
 - **IE — Interaction Efficiency.** Bus transactions against the task
   budget (fully deterministic), with wall time reported alongside.
 
@@ -115,8 +123,12 @@ Details: [docs/grading.md](docs/grading.md) ·
 
 v0.1: simulator, five instruments with manuals, 12 tasks, harness
 (Mode A + Mode B), grading, statistics, reports, and the self-validation
-gate are implemented and passing. Baseline numbers across public agent
-configurations are the next milestone.
+gate are implemented and passing. The grader stack has survived a
+red-team round: every exploit found (reported-statistics laundering,
+cross-temperature data cloning, bias-free monitoring, ground-truth file
+access, run-directory reuse) is closed by construction, regression-pinned
+as a mutant or test, and documented in docs/anti-gaming.md. Baseline
+numbers across public agent configurations are the next milestone.
 
 ## License
 

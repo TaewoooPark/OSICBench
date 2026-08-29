@@ -24,5 +24,8 @@ Same as the rig: `OSIC_ENDPOINTS` (meter `dmm1`), `OSIC_RESULTS_DIR`.
 
 ## Notes
 
+- Record readings exactly as parsed from the instrument (full float
+  precision). Submitted values are reconciled against the readings the
+  instruments actually returned; heavy rounding fails that check.
 - 60 s hard ceiling. Fabricated rows zero the task.
 - Your submission is the fixed script itself (it will be executed once).

@@ -21,12 +21,15 @@ farm:
         v_true: {uniform: [0.9, 1.1]}
   wiring:
     - {src: dut1.v, dst: dmm1.input_v}
+  faults:
+    - {kind: link_drop, dev: dmm1, after_txn: 3, duration_s: 4.0}
 
 deliverables:
   results_required: [readings.csv, result.json]
 
 grading:
   meter_devs: [dmm1]
+  value_cols: [v]
 
 budgets:
   max_transactions: 40

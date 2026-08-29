@@ -4,6 +4,20 @@ Mode A (one-shot): the farm starts only AFTER the submission is frozen -
 the code was necessarily written blind, from the brief and manuals alone.
 The runner then executes it once and grades what physically happened.
 
+Isolation of hidden state: the farm writes its flight recorder (which
+carries seeded ground truth) into a PRIVATE temporary directory outside
+the run tree. The submission is handed only a copy of ``endpoints.json``
+(host/port/resource - nothing else) under the run directory. After the
+farm stops, its files are collected into ``<run>/farm/`` for grading.
+This is best-effort separation for a trust-based sandbox, not an OS
+security boundary - see docs/anti-gaming.md; value-level fabrication
+reconciliation is the backstop that makes copied ground truth detectable
+regardless.
+
+Run directories are single-use: a non-empty output directory is refused
+(or wiped with ``overwrite=True``) so stale results and stale recorder
+lines can never leak into a fresh grade.
+
 SIGKILL scenario: when the task declares ``sigkill_at_s``, the runner
 SIGKILLs the submission's MAIN process at that moment. Child processes
 survive deliberately - a supervisor daemon is a legitimate defense, as is
@@ -18,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +42,29 @@ from .taskspec import TaskSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FARM_READY_TIMEOUT_S = 15.0
+
+
+class RunDirError(RuntimeError):
+    """Raised when an output directory would contaminate a fresh run."""
+
+
+def prepare_run_dir(path: Path, overwrite: bool = False) -> Path:
+    """Create a guaranteed-fresh run directory (absolute).
+
+    Reusing a directory that already holds results or a recorder would let
+    a previous run's artifacts grade a new submission; refuse unless the
+    caller explicitly asks for a wipe.
+    """
+    p = Path(path).resolve()
+    if p.exists() and any(p.iterdir()):
+        if not overwrite:
+            raise RunDirError(
+                f"refusing to reuse non-empty run directory {p} "
+                f"(pass overwrite=True / --overwrite to wipe it)"
+            )
+        shutil.rmtree(p)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 @dataclass
@@ -48,24 +86,29 @@ class RunResult:
 
 
 class FarmProcess:
-    """The farm as a child process with clean TERM->snapshot shutdown."""
+    """The farm as a child process with clean TERM->snapshot shutdown.
 
-    def __init__(self, task: TaskSpec, seed: int, farm_dir: Path) -> None:
-        self.farm_dir = Path(farm_dir).resolve()
-        self.farm_dir.mkdir(parents=True, exist_ok=True)
+    The farm's working files (recorder.jsonl with ground truth, its own
+    endpoints.json, farm.out) live in a private mkdtemp directory whose
+    path the submission is never told. ``collect()`` moves them into the
+    run tree once the farm has stopped.
+    """
+
+    def __init__(self, task: TaskSpec, seed: int) -> None:
+        self.private_dir = Path(tempfile.mkdtemp(prefix="osic-farm-"))
         env = dict(os.environ)
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "osicsim.farm",
              "--config", str(task.yaml_path), "--seed", str(seed),
-             "--out", str(self.farm_dir)],
+             "--out", str(self.private_dir)],
             env=env,
-            stdout=open(self.farm_dir / "farm.out", "w"),
+            stdout=open(self.private_dir / "farm.out", "w"),
             stderr=subprocess.STDOUT,
         )
 
     def wait_ready(self) -> Path:
-        endpoints = self.farm_dir / "endpoints.json"
+        endpoints = self.private_dir / "endpoints.json"
         deadline = time.monotonic() + FARM_READY_TIMEOUT_S
         while time.monotonic() < deadline:
             if endpoints.exists() and endpoints.stat().st_size > 0:
@@ -73,7 +116,7 @@ class FarmProcess:
             if self.proc.poll() is not None:
                 raise RuntimeError(
                     f"farm exited early (rc={self.proc.returncode}); "
-                    f"see {self.farm_dir / 'farm.out'}"
+                    f"see {self.private_dir / 'farm.out'}"
                 )
             time.sleep(0.05)
         raise TimeoutError("farm did not become ready")
@@ -87,9 +130,16 @@ class FarmProcess:
                 self.proc.kill()
                 self.proc.wait(timeout=3.0)
 
-    @property
-    def recorder_path(self) -> Path:
-        return self.farm_dir / "recorder.jsonl"
+    def collect(self, dest: Path) -> Path:
+        """Move the farm's files into the run tree (call after stop())."""
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ("recorder.jsonl", "endpoints.json", "farm.out"):
+            src = self.private_dir / name
+            if src.exists():
+                shutil.move(str(src), str(dest / name))
+        shutil.rmtree(self.private_dir, ignore_errors=True)
+        return dest
 
 
 def _stage_submission(submission: Path, dest: Path) -> Path:
@@ -117,21 +167,25 @@ def run_submission(
     seed: int,
     out_dir: Path,
     label: str = "unlabeled",
+    overwrite: bool = False,
 ) -> RunResult:
     """Mode A execution: farm up -> run submission once -> farm down."""
-    run_dir = Path(out_dir).resolve()   # absolute: the agent runs with its
-    run_dir.mkdir(parents=True, exist_ok=True)  # own cwd, paths must not re-anchor
+    run_dir = prepare_run_dir(out_dir, overwrite=overwrite)
     results_dir = run_dir / "results"
     results_dir.mkdir(exist_ok=True)
     main_py = _stage_submission(submission, run_dir / "submission")
 
-    farm = FarmProcess(task, seed, run_dir / "farm")
+    farm = FarmProcess(task, seed)
     sigkilled = False
     killed_by_limit = False
     exit_code: Optional[int] = None
     t0 = time.monotonic()
     try:
-        endpoints = farm.wait_ready()
+        endpoints_src = farm.wait_ready()
+        io_dir = run_dir / "io"
+        io_dir.mkdir(exist_ok=True)
+        endpoints = io_dir / "endpoints.json"
+        shutil.copy2(endpoints_src, endpoints)
         env = dict(os.environ)
         env["OSIC_ENDPOINTS"] = str(endpoints)
         env["OSIC_RESULTS_DIR"] = str(results_dir)
@@ -171,10 +225,7 @@ def run_submission(
         time.sleep(task.post_exit_grace_s)
     finally:
         farm.stop()
-        try:  # sweep any orphaned children of the submission
-            os.killpg(os.getpgid(0), 0)  # no-op guard; never kill our own group
-        except Exception:
-            pass
+        farm.collect(run_dir / "farm")
     wall = time.monotonic() - t0
     result = RunResult(run_dir, exit_code, killed_by_limit, sigkilled, wall)
     meta = {
@@ -193,13 +244,15 @@ class LiveSession:
 
     Every reset restarts the farm with the SAME seed (identical hidden
     physics, fresh state) in a new attempt directory. The FINAL attempt is
-    what gets graded.
+    what gets graded. Farm internals stay in a private directory per
+    attempt; the attempt directory exposes only ``io/endpoints.json``.
     """
 
-    def __init__(self, task: TaskSpec, seed: int, out_dir: Path) -> None:
+    def __init__(self, task: TaskSpec, seed: int, out_dir: Path,
+                 overwrite: bool = False) -> None:
         self.task = task
         self.seed = seed
-        self.out_dir = Path(out_dir)
+        self.out_dir = prepare_run_dir(out_dir, overwrite=overwrite)
         self.attempt = 0
         self.max_attempts = 1 + task.mode_b_resets
         self.farm: Optional[FarmProcess] = None
@@ -208,22 +261,31 @@ class LiveSession:
         return self.out_dir / f"attempt_{self.attempt:02d}"
 
     def start(self) -> Path:
-        self.attempt += 1
-        if self.attempt > self.max_attempts:
+        if self.attempt + 1 > self.max_attempts:
+            # Refuse BEFORE advancing: the last real attempt stays graded.
             raise RuntimeError(f"reset budget exhausted ({self.max_attempts} farms)")
+        self.attempt += 1
         d = self.attempt_dir()
         (d / "results").mkdir(parents=True, exist_ok=True)
-        self.farm = FarmProcess(self.task, self.seed, d / "farm")
-        return self.farm.wait_ready()
+        (d / "io").mkdir(exist_ok=True)
+        self.farm = FarmProcess(self.task, self.seed)
+        endpoints_src = self.farm.wait_ready()
+        endpoints = d / "io" / "endpoints.json"
+        shutil.copy2(endpoints_src, endpoints)
+        return endpoints
 
-    def reset(self) -> Path:
+    def _collect_current(self) -> None:
         if self.farm is not None:
             self.farm.stop()
+            self.farm.collect(self.attempt_dir() / "farm")
+            self.farm = None
+
+    def reset(self) -> Path:
+        self._collect_current()
         return self.start()
 
     def finish(self) -> Path:
-        if self.farm is not None:
-            self.farm.stop()
+        self._collect_current()
         meta = {
             "task": self.task.id,
             "seed": self.seed,
@@ -231,5 +293,8 @@ class LiveSession:
             "attempts_used": self.attempt,
             "reset_budget": self.max_attempts,
         }
+        final = self.attempt_dir()
+        final.mkdir(parents=True, exist_ok=True)
+        (final / "meta.json").write_text(json.dumps(meta, indent=2))
         (self.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-        return self.attempt_dir()
+        return final

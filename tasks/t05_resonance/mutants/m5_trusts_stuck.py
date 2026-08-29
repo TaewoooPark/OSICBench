@@ -1,4 +1,5 @@
-"""T05 reference (procedural): coarse scan -> fine scan -> 1/R quadratic fit."""
+"""Mutant: believes every reading - a frozen display goes straight into
+the spectrum and the fit."""
 import json
 import os
 import socket
@@ -56,19 +57,11 @@ def main():
     s = socket.create_connection((ep["host"], ep["port"]), timeout=15)
     s.settimeout(15)
     rows = []
-    last_raw = [None]
 
     def measure(freq):
         w(s, f"SOUR:FREQ {freq:.1f}")
         time.sleep(SETTLE_S)
         r = float(q_(s, "OUTP? 3"))
-        # Frozen-display defense: with live noise, two byte-identical
-        # readings at different drive points are physically implausible.
-        t_retry = time.monotonic()
-        while r == last_raw[0] and time.monotonic() - t_retry < 8.0:
-            time.sleep(0.4)
-            r = float(q_(s, "OUTP? 3"))
-        last_raw[0] = r
         rows.append((time.time(), freq, r))
         return r
 
