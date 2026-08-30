@@ -189,3 +189,30 @@ def test_d610_input_impedance_command_and_export():
     assert code == -222 and dev.get_export("r_in") == 10e9
     dev.power_on()
     assert dev.get_export("r_in") == 10e6  # glitch resets with everything
+
+
+def test_d610_firmware21_opc_immediate_and_esr_latch():
+    import time as _time
+    from osicsim.instruments.mer_d610 import MerD610
+
+    dev = MerD610("dmm1")
+    dev.attach(None, None, None, {"firmware": "2.1"})
+    assert dev.IDN.endswith(",2.1")
+    dev.process_message("SENS:VOLT:DC:NPLC 0.02")
+    dev.process_message("SAMP:COUN 3")
+    dev.process_message("INIT")
+    # 2.1: OPC answers immediately even though the buffer is running.
+    assert dev.opc_delay() == 0.0
+    resp = dev.process_message("*ESR?")
+    assert int(resp[0].payload) & 0x01 == 0  # not complete yet
+    _time.sleep(3 * (0.02 / 50.0 + 0.004) * 2 + 0.1)
+    dev.tick(_time.monotonic())
+    resp = dev.process_message("*ESR?")
+    assert int(resp[0].payload) & 0x01 == 1  # latched on completion
+    resp = dev.process_message("*ESR?")
+    assert int(resp[0].payload) & 0x01 == 0  # cleared by the read
+    # 1.7 units keep the blocking OPC.
+    legacy = MerD610("dmm2")
+    legacy.process_message("SAMP:COUN 3")
+    legacy.process_message("INIT")
+    assert legacy.opc_delay() > 0.0

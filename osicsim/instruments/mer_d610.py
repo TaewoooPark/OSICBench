@@ -38,6 +38,17 @@ INPUT_R_ALLOWED = (10e6, 10e9)
 class MerD610(SCPIDevice):
     IDN = "Meridian Instruments,MER-D610,D610-0093,1.7"
 
+    def attach(self, hub, recorder, rng, options=None) -> None:
+        super().attach(hub, recorder, rng, options)
+        fw = self.options.get("firmware")
+        if fw:
+            # Newer-batch units identify their firmware; behavior
+            # differences are documented in the manual's firmware note.
+            self.IDN = self.IDN.rsplit(",", 1)[0] + f",{fw}"
+
+    def _fw21(self) -> bool:
+        return str(self.options.get("firmware", "")) == "2.1"
+
     def build(self) -> None:
         self.register("SENSe:VOLTage:DC:NPLCycles", write=self._w_nplc, query=lambda: self.nplc)
         self.register("SYSTem:AZERo", write=self._w_azer, query=self._q_azer)
@@ -59,6 +70,7 @@ class MerD610(SCPIDevice):
         self.buffer_n = 0
         self.buffer_nplc = NPLC_DEFAULT
         self.last_reading: Optional[float] = None
+        self._buf_done_latched = False
 
     # ------------------------------------------------------------------
 
@@ -132,6 +144,7 @@ class MerD610(SCPIDevice):
         self.buffer_start = time.monotonic()
         self.buffer_n = self.samp_count
         self.buffer_nplc = self.nplc
+        self._buf_done_latched = False
 
     def _buffer_remaining(self) -> float:
         if self.buffer_start is None:
@@ -164,7 +177,18 @@ class MerD610(SCPIDevice):
     # ------------------------------------------------------------------
 
     def opc_delay(self) -> float:
+        if self._fw21():
+            # Firmware 2.1: *OPC? no longer blocks on the acquisition
+            # buffer; completion is signaled via *ESR? bit 0 instead.
+            return 0.0
         return self._buffer_remaining()
+
+    def tick(self, now: float) -> None:
+        if (self._fw21() and self.buffer_start is not None
+                and self._buffer_remaining() <= 0.0
+                and not getattr(self, "_buf_done_latched", False)):
+            self._buf_done_latched = True
+            self._esr |= 0x01  # Operation Complete bit, latched until read
 
     def get_export(self, field: str) -> float:
         if field == "r_in":

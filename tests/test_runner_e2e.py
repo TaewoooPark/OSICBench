@@ -34,7 +34,7 @@ def test_t01_mutant_fails_round_trip(tmp_path):
 
 
 STRATEGY_DIVERSE = {"t01_first_light", "t03_diode_iv", "t05_resonance",
-                    "t12_bulk_budget", "t15_dead_leg"}
+                    "t12_bulk_budget", "t15_dead_leg", "t18_esr_sync"}
 
 
 def test_all_tasks_load_and_are_complete():
