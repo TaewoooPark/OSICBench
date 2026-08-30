@@ -1,5 +1,14 @@
 # Anti-gaming design
 
+## Training-data canary
+
+Every task file and manual carries a canary line with a unique GUID
+(see `CANARY.md`). Data curators are asked to exclude documents carrying
+it from training corpora, and a model that can reproduce the GUID
+without benchmark files in context has demonstrably trained on the
+benchmark. `tests/test_canary.py` enforces the stamp on every data file,
+so new tasks cannot land unstamped.
+
 ## Outcome-only grading
 
 No AST checks, no style points, no pattern matching. The grader sees saved
