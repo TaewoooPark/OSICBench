@@ -240,3 +240,21 @@ def test_reported_stats_cannot_launder_bad_noise():
     assert spec < 70.0  # weakest-parameter rule: the task fails
     honesty = param_score(abs(0.0 - sample_std), max(2.0e-6, 0.06 * sample_std))
     assert honesty == 0.0
+
+
+def test_max_step_initial_closes_power_on_blind_spot():
+    from osicbench.grading import _run_rule
+
+    events = [
+        {"kind": "state", "dev": "smu1", "field": "source_target",
+         "old": 0.0, "new": 0.8, "t": 1.0},
+        {"kind": "state", "dev": "smu1", "field": "source_target",
+         "old": 0.8, "new": 0.7, "t": 2.0},
+    ]
+    rule = {"check": "max_step", "dev": "smu1", "field": "source_target",
+            "limit": 0.105}
+    ok, _ = _run_rule("max_step", rule, events, {})
+    assert ok  # blind: the 0 -> 0.8 jump has no recorded predecessor
+    rule["initial"] = 0.0
+    ok, detail = _run_rule("max_step", rule, events, {})
+    assert not ok and "0.8" in detail

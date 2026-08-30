@@ -128,7 +128,11 @@ def _run_rule(check: str, rule: dict, events: List[dict], snapshot: dict) -> Tup
         series = rec.state_series(events, rule["dev"], rule["field"])
         limit = float(rule["limit"])
         worst = 0.0
-        prev: Optional[float] = None
+        # ``initial`` closes the power-on blind spot: without it, a first
+        # write that jumps straight from the (never-recorded) power-on
+        # value to full scale produces no consecutive pair to measure.
+        prev: Optional[float] = (float(rule["initial"])
+                                 if "initial" in rule else None)
         for _, value in series:
             try:
                 v = float(value)

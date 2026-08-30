@@ -140,3 +140,35 @@ class TestCommon:
         assert dev.volt == 10.0
         dev.process_message(":SOUR:VOLT MIN")
         assert dev.volt == 0.0
+
+
+def test_s240_setpoint_readback_and_conflict():
+    from osicsim.instruments.mer_s240 import MerS240
+
+    dev = MerS240("smu1")
+    dev.process_message("SOUR:FUNC CURR")
+    dev.process_message("SOUR:CURR 0.4")
+    resp = dev.process_message("SOUR:CURR?")
+    assert len(resp) == 1 and abs(float(resp[0].payload) - 0.4) < 1e-12
+    # Mismatched-function readback is a settings conflict, like the write.
+    assert dev.process_message("SOUR:VOLT?") == []
+    code, _ = dev.pop_error()
+    assert code == -221
+
+
+def test_unexpected_handler_exception_becomes_device_error():
+    from osicsim.device import SCPIDevice
+
+    class Buggy(SCPIDevice):
+        def build(self):
+            self.register("BOOM", query=self._q_boom)
+
+        def _q_boom(self):
+            raise RuntimeError("firmware bug")
+
+    dev = Buggy("dev1")
+    # No response (client-side timeout), but the connection handler must
+    # survive: the exception is queued as a device error instead.
+    assert dev.process_message("BOOM?") == []
+    code, msg = dev.pop_error()
+    assert code == -300 and "RuntimeError" in msg

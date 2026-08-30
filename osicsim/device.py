@@ -204,6 +204,11 @@ class SCPIDevice:
             except scpi.ScpiParseError as exc:
                 self.push_error(-104, f"Data type error;{exc}")
                 continue
+            except Exception as exc:  # firmware bug, not a dead instrument:
+                # queue a device error instead of letting the exception kill
+                # the connection handler (which reads as a silent link death).
+                self.push_error(-300, f"Device-specific error;{type(exc).__name__}: {exc}")
+                continue
             if cmd.is_query and result is not None:
                 responses.append(result)
         return responses

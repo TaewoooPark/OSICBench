@@ -34,12 +34,12 @@ def test_t01_mutant_fails_round_trip(tmp_path):
 
 
 STRATEGY_DIVERSE = {"t01_first_light", "t03_diode_iv", "t05_resonance",
-                    "t12_bulk_budget"}
+                    "t12_bulk_budget", "t15_dead_leg"}
 
 
 def test_all_tasks_load_and_are_complete():
     tasks = discover_tasks(REPO / "tasks")
-    assert len(tasks) == 12
+    assert len(tasks) >= 12
     for task in tasks:
         assert len(task.references()) >= 2, f"{task.id}: needs 2+ reference idioms"
         if task.id in STRATEGY_DIVERSE:

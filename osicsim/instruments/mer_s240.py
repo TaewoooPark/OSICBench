@@ -97,6 +97,14 @@ class MerS240(SCPIDevice):
         self.level.set_target(value)
         self.record_state("source_target", old, value)
 
+    def _target_of(self, func: str) -> float:
+        """Setpoint readback; mismatched function is a conflict, like writes."""
+        if self.func != func:
+            raise SettingsConflict(
+                f"SOUR:{func}? while sourcing "
+                f"{'current' if self.func == 'CURR' else 'voltage'}")
+        return self.level.target
+
     def _w_ilim(self, args: List[str]) -> None:
         v = scpi.parse_number(args[0], minimum=ILIM_RANGE[0], maximum=ILIM_RANGE[1])
         self._guard_range(v, ILIM_RANGE, "SENS:CURR:PROT")
