@@ -178,6 +178,7 @@ def run_submission(
     farm = FarmProcess(task, seed)
     sigkilled = False
     killed_by_limit = False
+    restarted = False
     exit_code: Optional[int] = None
     t0 = time.monotonic()
     try:
@@ -190,26 +191,42 @@ def run_submission(
         env["OSIC_ENDPOINTS"] = str(endpoints)
         env["OSIC_RESULTS_DIR"] = str(results_dir)
         env.pop("PYTHONPATH", None)  # submissions are self-contained
-        agent = subprocess.Popen(
-            [sys.executable, "-u", str(main_py)],
-            cwd=str(run_dir / "submission"),
-            env=env,
-            stdout=open(run_dir / "agent.out", "w"),
-            stderr=open(run_dir / "agent.err", "w"),
-            start_new_session=True,
-        )
+
+        def spawn(mode: str) -> subprocess.Popen:
+            return subprocess.Popen(
+                [sys.executable, "-u", str(main_py)],
+                cwd=str(run_dir / "submission"),
+                env=env,
+                stdout=open(run_dir / "agent.out", mode),
+                stderr=open(run_dir / "agent.err", mode),
+                start_new_session=True,
+            )
+
+        agent = spawn("w")
         deadline = t0 + task.wall_clock_limit_s
         kill_at = None if task.sigkill_at_s is None else t0 + task.sigkill_at_s
+        restart_at: Optional[float] = None
         while True:
             rc = agent.poll()
             now = time.monotonic()
             if rc is not None:
-                exit_code = rc
-                break
+                if restart_at is None:
+                    exit_code = rc
+                    break
+                if now >= restart_at:
+                    # Restart scenario: the SAME main.py runs again in the
+                    # same working directory against the same farm - the
+                    # submission's own checkpointing is what resumes it.
+                    agent = spawn("a")
+                    restarted = True
+                    restart_at = None
+                    continue
             if kill_at is not None and now >= kill_at and not sigkilled:
                 os.kill(agent.pid, signal.SIGKILL)  # main pid ONLY
                 sigkilled = True
                 kill_at = None
+                if task.restart_after_kill_s is not None:
+                    restart_at = now + task.restart_after_kill_s
                 continue
             if now >= deadline:
                 killed_by_limit = True
@@ -233,6 +250,7 @@ def run_submission(
         "seed": seed,
         "label": label,
         "mode": "a",
+        "restarted": restarted,
         **result.meta,
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))

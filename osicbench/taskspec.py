@@ -33,6 +33,13 @@ class TaskSpec:
         return None if v is None else float(v)
 
     @property
+    def restart_after_kill_s(self) -> float | None:
+        """When set (with sigkill_at_s), the runner restarts the killed
+        submission once, this many seconds after the kill."""
+        v = self.config.get("restart_after_kill_s")
+        return None if v is None else float(v)
+
+    @property
     def mode_b_resets(self) -> int:
         return int(self.config.get("mode_b_resets", 3))
 
