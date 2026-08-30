@@ -1,0 +1,11 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+runs/
+reports/
+notes/
+PLAN.md
+PROVENANCE.md

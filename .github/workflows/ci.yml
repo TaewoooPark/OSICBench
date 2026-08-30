@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - name: Unit, hardening, and canary tests
+        run: python3 -m pytest
+      - name: Validation gate on fast tasks (references pass, mutants fail)
+        run: |
+          osicbench validate --tasks tasks --task t01_first_light \
+              --seeds 2 --jobs 4 --out /tmp/v_t01
+          osicbench validate --tasks tasks --task t03_diode_iv \
+              --seeds 2 --jobs 4 --out /tmp/v_t03
+          osicbench validate --tasks tasks --task t12_bulk_budget \
+              --seeds 2 --jobs 4 --out /tmp/v_t12
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the reference evaluation image
+        run: docker build -t osicbench .
+      - name: Test suite inside the image
+        run: docker run --rm osicbench python3 -m pytest
