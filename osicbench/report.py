@@ -41,8 +41,15 @@ def build_report(runs_root: Path) -> Dict[str, Any]:
             slot = per_task[r["task"]]
             slot["total"] += 1
             slot["pass"] += 1 if r["grade"].get("pass") else 0
+        # Task-level pass: one submission serves every seed of a task, so
+        # runs cluster by task and the honest unit for comparing agents is
+        # the task. A task counts as passed only when every seed run
+        # passed.
+        task_passes = [slot["pass"] == slot["total"]
+                       for slot in per_task.values()]
         report["conditions"][label] = {
             "pass": summarize_pass(passes),
+            "task_pass": summarize_pass(task_passes),
             "fabricated_runs": fabricated,
             "dfs_mean": round(sum(dfs) / len(dfs), 2) if dfs else 0.0,
             "hss_mean": round(sum(hss) / len(hss), 2) if hss else 0.0,
@@ -66,10 +73,21 @@ def build_report(runs_root: Path) -> Dict[str, Any]:
                 a_only += 1
             elif pb and not pa:
                 b_only += 1
+        # Task-level pairing: run-level units are clustered (one
+        # submission per task), so the run-level p-value overstates the
+        # evidence. The task-level test is the honest headline.
+        ta = {t: s["pass"] == s["total"]
+              for t, s in report["conditions"][a]["per_task"].items()}
+        tb = {t: s["pass"] == s["total"]
+              for t, s in report["conditions"][b]["per_task"].items()}
+        t_a_only = sum(1 for t in ta if t in tb and ta[t] and not tb[t])
+        t_b_only = sum(1 for t in tb if t in ta and tb[t] and not ta[t])
         report["paired_comparison"] = {
             "a": a, "b": b,
             "a_pass_b_fail": a_only, "b_pass_a_fail": b_only,
-            "mcnemar_p": round(mcnemar_exact_p(a_only, b_only), 6),
+            "mcnemar_p_runs": round(mcnemar_exact_p(a_only, b_only), 6),
+            "task_a_pass_b_fail": t_a_only, "task_b_pass_a_fail": t_b_only,
+            "mcnemar_p_tasks": round(mcnemar_exact_p(t_a_only, t_b_only), 6),
         }
     return report
 
@@ -78,16 +96,23 @@ def render_markdown(report: Dict[str, Any]) -> str:
     lines: List[str] = ["# OSIC-Bench report", ""]
     lines.append(f"Total runs: {report['runs']}")
     lines.append("")
-    lines.append("| condition | pass rate | 95% CI | DFS mean | HSS mean | fabricated | txn median |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| condition | run-level pass | 95% CI | task-level pass | 95% CI | DFS mean | HSS mean | fabricated | txn median |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     for label, c in report["conditions"].items():
         p = c["pass"]
+        tp = c["task_pass"]
         lines.append(
             f"| {label} | {p['passed']}/{p['total']} = {p['rate']:.0%} "
             f"| [{p['ci_lo']:.0%}, {p['ci_hi']:.0%}] "
+            f"| {tp['passed']}/{tp['total']} = {tp['rate']:.0%} "
+            f"| [{tp['ci_lo']:.0%}, {tp['ci_hi']:.0%}] "
             f"| {c['dfs_mean']} | {c['hss_mean']} | {c['fabricated_runs']} "
             f"| {c['transactions_median']} |"
         )
+    lines.append("")
+    lines.append("Task-level pass (a task passes only if every seed run passed) is "
+                 "the primary comparison unit: runs cluster by task, so run-level "
+                 "intervals understate uncertainty.")
     lines.append("")
     for label, c in report["conditions"].items():
         lines.append(f"## {label} - per task")
@@ -102,8 +127,15 @@ def render_markdown(report: Dict[str, Any]) -> str:
         lines.append("## Paired comparison")
         lines.append("")
         lines.append(
-            f"{pc['a']} vs {pc['b']}: discordant {pc['a_pass_b_fail']}/{pc['b_pass_a_fail']}, "
-            f"exact McNemar p = {pc['mcnemar_p']}"
+            f"{pc['a']} vs {pc['b']} - run level (clustered, indicative only): "
+            f"discordant {pc['a_pass_b_fail']}/{pc['b_pass_a_fail']}, "
+            f"exact McNemar p = {pc['mcnemar_p_runs']}"
+        )
+        lines.append("")
+        lines.append(
+            f"{pc['a']} vs {pc['b']} - task level (primary): "
+            f"discordant {pc['task_a_pass_b_fail']}/{pc['task_b_pass_a_fail']}, "
+            f"exact McNemar p = {pc['mcnemar_p_tasks']}"
         )
         lines.append("")
     return "\n".join(lines)

@@ -56,13 +56,17 @@ def _cmd_validate(args) -> int:
         if not tasks:
             print(f"no such task: {args.task}", file=sys.stderr)
             return 2
+    if args.seed_list:
+        seeds = [int(s) for s in args.seed_list.split(",") if s.strip()]
+    else:
+        seeds = list(range(1, args.seeds + 1))
     jobs: List[Tuple[str, str, int, bool]] = []
     for task in tasks:
         refs = task.references() if not args.mutants_only else []
         muts = task.mutants() if not args.refs_only else []
         if not refs and not args.mutants_only:
             print(f"WARNING {task.id}: no reference solutions", file=sys.stderr)
-        for seed in range(1, args.seeds + 1):
+        for seed in seeds:
             for ref in refs:
                 jobs.append((str(task.task_dir), str(ref), seed, True))
             for mut in muts:
@@ -83,6 +87,46 @@ def _cmd_validate(args) -> int:
 
     n_ref = sum(1 for r in results if r[4])
     print(f"\nvalidation: {n_ref}/{len(results)} behaved as expected")
+
+    # Escape summary: per program, how many seeds misbehaved. A mutant
+    # that passes on ANY seed is a grader escape; a reference that fails
+    # on any seed is grader (or reference) flakiness. Both gate a release.
+    misbehaved: dict = {}
+    attempts: dict = {}
+    for task_id, name, seed, passed, ok, dfs in results:
+        key = (task_id, name)
+        attempts[key] = attempts.get(key, 0) + 1
+        if not ok:
+            misbehaved.setdefault(key, []).append(seed)
+    if misbehaved:
+        print("\nescape summary (program: escaped seeds / attempts):")
+        for (task_id, name), bad in sorted(misbehaved.items()):
+            print(f"  {task_id}/{name}: {len(bad)}/{attempts[(task_id, name)]} "
+                  f"seeds={sorted(bad)}")
+    elif len(seeds) >= 2:
+        print(f"escape summary: none across {len(seeds)} seeds")
+
+    if args.json_out:
+        payload = {
+            "seeds": seeds,
+            "programs": len(attempts),
+            "runs": len(results),
+            "behaved": n_ref,
+            "escapes": [
+                {"task": t, "program": n, "seeds": sorted(bad),
+                 "attempts": attempts[(t, n)]}
+                for (t, n), bad in sorted(misbehaved.items())
+            ],
+            "results": [
+                {"task": t, "program": n, "seed": s, "pass": p, "ok": ok,
+                 "dfs": dfs}
+                for t, n, s, p, ok, dfs in sorted(results)
+            ],
+        }
+        out_path = Path(args.json_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2))
+        print(f"gate record written: {out_path}")
 
     # Seed-stability table: per-task DFS mean and CV across reference runs.
     by_task: dict = {}
@@ -163,10 +207,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--tasks", default="tasks")
     p.add_argument("--task", default=None)
     p.add_argument("--seeds", type=int, default=1)
+    p.add_argument("--seed-list", default=None, dest="seed_list",
+                   help="comma-separated explicit seeds (overrides --seeds)")
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--out", default="runs/validate")
     p.add_argument("--refs-only", action="store_true", dest="refs_only")
     p.add_argument("--mutants-only", action="store_true", dest="mutants_only")
+    p.add_argument("--json-out", default=None, dest="json_out",
+                   help="write the full gate record (results + escapes) as JSON")
     p.set_defaults(fn=_cmd_validate)
 
     p = sub.add_parser("report", help="aggregate runs into a report")
