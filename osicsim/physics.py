@@ -338,6 +338,43 @@ class ThermalPlantDUT(DUT):
         return {"temp_k": self.output("temp_k")}
 
 
+class JouleResistorDUT(DUT):
+    """A precision resistor that self-heats under measurement current.
+    Params: r, t_amb, gain_k_per_w, tau_s.
+
+    Input: force_i. Outputs: v_4w = i * r (sense voltage) and temp_k, a
+    first-order thermal plant driven by P = i^2 * r. The measurement
+    itself is the heat source - reading it continuously cooks it.
+    """
+
+    def __init__(self, name, params, rng):
+        super().__init__(name, params, rng)
+        self._temp = params["t_amb"]
+        self._t = time.monotonic()
+        self._last_p = 0.0
+
+    def _advance(self, now: float) -> None:
+        i = self.input("force_i")
+        p = i * i * self.params["r"]
+        t_ss = self.params["t_amb"] + self.params["gain_k_per_w"] * self._last_p
+        dt = max(0.0, now - self._t)
+        self._temp = t_ss + (self._temp - t_ss) * math.exp(-dt / self.params["tau_s"])
+        self._t = now
+        self._last_p = p
+
+    def output(self, field: str, now: Optional[float] = None) -> float:
+        now = time.monotonic() if now is None else now
+        self._advance(now)
+        if field == "v_4w":
+            return self.input("force_i") * self.params["r"]
+        if field == "temp_k":
+            return self._temp
+        raise KeyError(field)
+
+    def sample_fields(self) -> Dict[str, float]:
+        return {"temp_k": self.output("temp_k")}
+
+
 class ResonanceDUT(DUT):
     """Lorentzian resonance with a drifting center. Params: f0, gamma, amp,
     drift_rate_hz_per_rt_s (random-walk sigma per sqrt second).
@@ -403,6 +440,7 @@ DUT_REGISTRY: Dict[str, type] = {
     "resistor": ResistorDUT,
     "diode": DiodeDUT,
     "hysteresis": HysteresisDUT,
+    "joule_resistor": JouleResistorDUT,
     "thermal_plant": ThermalPlantDUT,
     "resonance": ResonanceDUT,
     "poisson_source": PoissonSourceDUT,

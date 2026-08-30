@@ -199,3 +199,24 @@ def test_resistive_source_divider():
     assert d.output("v") == pytest.approx(1.0 * 10e6 / (10e6 + 1e5))
     load["r"] = 10e9
     assert d.output("v") == pytest.approx(1.0 * 10e9 / (10e9 + 1e5))
+
+
+def test_joule_resistor_self_heats_and_cools():
+    from osicsim.physics import build_dut
+    import time as _time
+
+    d = build_dut("jr1", "joule_resistor", 5,
+                  {"r": 2.0, "t_amb": 296.0, "gain_k_per_w": 80.0, "tau_s": 8.0})
+    drive = {"i": 0.0}
+    d.bind_input("force_i", lambda: drive["i"])
+    t0 = _time.monotonic()
+    assert d.output("temp_k", t0) == pytest.approx(296.0)
+    drive["i"] = 0.5
+    d.output("temp_k", t0)                    # register the power step
+    t_hot = d.output("temp_k", t0 + 8.0)      # one tau at 0.5 A: ~63% of 40 K
+    assert 296.0 + 20.0 < t_hot < 296.0 + 30.0
+    assert d.output("v_4w", t0 + 8.0) == pytest.approx(1.0)
+    drive["i"] = 0.0
+    d.output("temp_k", t0 + 8.0)
+    t_cool = d.output("temp_k", t0 + 8.0 + 16.0)  # two tau of cooling
+    assert t_cool < 296.0 + (t_hot - 296.0) * 0.2
