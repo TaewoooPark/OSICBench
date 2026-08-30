@@ -16,7 +16,7 @@
 FROM python:3.12-slim
 
 WORKDIR /opt/osicbench
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE CANARY.md ./
 COPY osicsim ./osicsim
 COPY osicbench ./osicbench
 COPY tasks ./tasks
