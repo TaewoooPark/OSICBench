@@ -177,6 +177,26 @@ class DeadLegPairDUT(DUT):
         return {"va": self.output("va"), "vb": self.output("vb")}
 
 
+class AttenuatorDUT(DUT):
+    """A passive conditioning pad between a source and the fixture.
+    Params: gain, offset (draw both with ``choice`` for guaranteed
+    separation from unity). Input: v_in. Output: v_out = gain*v_in+offset.
+
+    The fixture terminal voltage - what phys_sample records and what
+    tasks grade - is this output, so an open-loop setpoint inherits the
+    pad's full error.
+    """
+
+    def output(self, field: str, now: Optional[float] = None) -> float:
+        if field == "v_out":
+            return (self.params["gain"] * self.input("v_in")
+                    + self.params.get("offset", 0.0))
+        raise KeyError(field)
+
+    def sample_fields(self) -> Dict[str, float]:
+        return {"v_out": self.output("v_out")}
+
+
 class ResistiveSourceDUT(DUT):
     """An EMF behind a source resistance. Params: emf, r_src.
 
@@ -375,6 +395,7 @@ class PoissonSourceDUT(DUT):
 
 
 DUT_REGISTRY: Dict[str, type] = {
+    "attenuator": AttenuatorDUT,
     "const_voltage": ConstVoltageDUT,
     "dead_leg_pair": DeadLegPairDUT,
     "ramp_voltage": RampVoltageDUT,
