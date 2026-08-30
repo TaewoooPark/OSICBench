@@ -9,6 +9,7 @@ from .mer_d610 import MerD610
 from .mer_p330 import MerP330
 from .mer_t115 import MerT115
 from .mer_l820 import MerL820
+from .mer_g150 import MerG150
 
 REGISTRY = {
     "mer_s240": MerS240,
@@ -16,4 +17,5 @@ REGISTRY = {
     "mer_p330": MerP330,
     "mer_t115": MerT115,
     "mer_l820": MerL820,
+    "mer_g150": MerG150,
 }

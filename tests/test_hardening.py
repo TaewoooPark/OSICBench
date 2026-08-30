@@ -258,3 +258,34 @@ def test_max_step_initial_closes_power_on_blind_spot():
     rule["initial"] = 0.0
     ok, detail = _run_rule("max_step", rule, events, {})
     assert not ok and "0.8" in detail
+
+
+def test_never_while_interlock_rule():
+    from osicbench.grading import _run_rule
+
+    def phys(t, v):
+        return {"kind": "phys_sample", "dev": "chamber1", "field": "level",
+                "value": v, "t": t}
+
+    def outp(t, on):
+        return {"kind": "state", "dev": "psu1", "field": "output_ch1",
+                "old": (not on), "new": on, "t": t}
+
+    rule = {"check": "never_while", "dev": "psu1", "field": "output_ch1",
+            "node": "chamber1", "phys_field": "level", "max": 8.0,
+            "grace_s": 2.0}
+    # Excursion at t=10..16; controller trips at t=11 (inside grace): OK.
+    events = ([outp(0.0, True)]
+              + [phys(t / 10.0, 3.0) for t in range(0, 100)]
+              + [phys(10.0 + k / 10.0, 12.0) for k in range(0, 60)]
+              + [outp(11.0, False)]
+              + [phys(16.0 + k / 10.0, 3.0) for k in range(0, 20)])
+    events.sort(key=lambda e: e["t"])
+    ok, _ = _run_rule("never_while", rule, events, {})
+    assert ok
+    # Same excursion, controller never trips: samples past t=12 violate.
+    events2 = ([outp(0.0, True)]
+               + [phys(t / 10.0, 3.0) for t in range(0, 100)]
+               + [phys(10.0 + k / 10.0, 12.0) for k in range(0, 60)])
+    ok, detail = _run_rule("never_while", rule, events2, {})
+    assert not ok and "samples" in detail

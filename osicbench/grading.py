@@ -151,6 +151,41 @@ def _run_rule(check: str, rule: dict, events: List[dict], snapshot: dict) -> Tup
         series = rec.state_series(events, rule["dev"], rule["field"])
         hit = [t for t, v in series if v is True]
         return not hit, f"{rule['dev']}.{rule['field']} true {len(hit)}x"
+    if check == "never_while":
+        # Cross-device interlock: a state field must not be true while a
+        # recorded physical quantity is beyond ``max``, allowing
+        # ``grace_s`` seconds from the start of each excursion for the
+        # controller to react. Judged sample-by-sample against the
+        # 10 Hz physics record; the state timeline is reconstructed from
+        # transitions (power-on assumed false).
+        phys = rec.phys_series(events, rule["node"], rule["phys_field"])
+        state = rec.state_series(events, rule["dev"], rule["field"])
+        limit = float(rule["max"])
+        grace = float(rule.get("grace_s", 0.0))
+
+        def state_at(t: float) -> bool:
+            value = False
+            for ts, v in state:
+                if ts <= t:
+                    value = bool(v is True or v == 1)
+                else:
+                    break
+            return value
+
+        violations = 0
+        excursion_start: Optional[float] = None
+        for t, v in phys:
+            if v > limit:
+                if excursion_start is None:
+                    excursion_start = t
+                if t - excursion_start > grace and state_at(t):
+                    violations += 1
+            else:
+                excursion_start = None
+        return violations == 0, (
+            f"{rule['dev']}.{rule['field']} true beyond grace during "
+            f"{rule['node']}.{rule['phys_field']} > {limit} at "
+            f"{violations} samples")
     raise ValueError(f"unknown hss check {check!r}")
 
 

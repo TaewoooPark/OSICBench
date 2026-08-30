@@ -338,6 +338,42 @@ class ThermalPlantDUT(DUT):
         return {"temp_k": self.output("temp_k")}
 
 
+class SpikingLevelDUT(DUT):
+    """A chamber quantity (pressure-like) that relaxes toward a seeded
+    base and gets kicked upward by scheduled fault events. Params: base,
+    tau_s. Output: level. ``kick('level', delta)`` (the drift_step fault
+    hook) steps the LIVE level, which then decays back with tau_s.
+    """
+
+    def __init__(self, name, params, rng):
+        super().__init__(name, params, rng)
+        self._level = params["base"]
+        self._t = time.monotonic()
+
+    def _advance(self, now: float) -> None:
+        dt = max(0.0, now - self._t)
+        base = self.params["base"]
+        self._level = base + (self._level - base) * math.exp(-dt / self.params["tau_s"])
+        self._t = now
+
+    def kick(self, field: str, delta: float) -> None:
+        if field == "level":
+            self._advance(time.monotonic())
+            self._level += delta
+        else:
+            super().kick(field, delta)
+
+    def output(self, field: str, now: Optional[float] = None) -> float:
+        now = time.monotonic() if now is None else now
+        self._advance(now)
+        if field == "level":
+            return self._level
+        raise KeyError(field)
+
+    def sample_fields(self) -> Dict[str, float]:
+        return {"level": self.output("level")}
+
+
 class JouleResistorDUT(DUT):
     """A precision resistor that self-heats under measurement current.
     Params: r, t_amb, gain_k_per_w, tau_s.
@@ -437,6 +473,7 @@ DUT_REGISTRY: Dict[str, type] = {
     "dead_leg_pair": DeadLegPairDUT,
     "ramp_voltage": RampVoltageDUT,
     "resistive_source": ResistiveSourceDUT,
+    "spiking_level": SpikingLevelDUT,
     "resistor": ResistorDUT,
     "diode": DiodeDUT,
     "hysteresis": HysteresisDUT,
