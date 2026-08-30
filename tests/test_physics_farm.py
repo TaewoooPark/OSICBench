@@ -186,3 +186,16 @@ def test_dead_leg_pair_exactly_one_leg_silent():
         else:
             assert vb == 0.0 and 0.9 <= va <= 1.1
     assert seen == {1, 2}  # both outcomes occur across seeds
+
+
+def test_resistive_source_divider():
+    from osicsim.physics import build_dut
+
+    d = build_dut("src1", "resistive_source", 3,
+                  {"emf": 1.0, "r_src": 1.0e5})
+    assert d.output("v") == pytest.approx(1.0)  # unloaded: ideal EMF
+    load = {"r": 10e6}
+    d.bind_input("r_load", lambda: load["r"])
+    assert d.output("v") == pytest.approx(1.0 * 10e6 / (10e6 + 1e5))
+    load["r"] = 10e9
+    assert d.output("v") == pytest.approx(1.0 * 10e9 / (10e9 + 1e5))

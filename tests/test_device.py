@@ -172,3 +172,20 @@ def test_unexpected_handler_exception_becomes_device_error():
     assert dev.process_message("BOOM?") == []
     code, msg = dev.pop_error()
     assert code == -300 and "RuntimeError" in msg
+
+
+def test_d610_input_impedance_command_and_export():
+    from osicsim.instruments.mer_d610 import MerD610
+
+    dev = MerD610("dmm1")
+    assert dev.get_export("r_in") == 10e6  # documented power-on default
+    assert dev.process_message("INP:IMP 10E9") == []
+    assert dev.get_export("r_in") == 10e9
+    resp = dev.process_message("INP:IMP?")
+    assert float(resp[0].payload) == 10e9
+    # unsupported value refused, setting unchanged
+    dev.process_message("INP:IMP 5E7")
+    code, _ = dev.pop_error()
+    assert code == -222 and dev.get_export("r_in") == 10e9
+    dev.power_on()
+    assert dev.get_export("r_in") == 10e6  # glitch resets with everything

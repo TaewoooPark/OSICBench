@@ -31,6 +31,8 @@ LINE_FREQ = 50.0
 BASE_SIGMA_V = 200e-6  # at NPLC 1
 SAMP_RANGE = (1, 10000)
 READ_OVERHEAD_S = 0.004
+INPUT_R_DEFAULT = 10e6
+INPUT_R_ALLOWED = (10e6, 10e9)
 
 
 class MerD610(SCPIDevice):
@@ -40,6 +42,8 @@ class MerD610(SCPIDevice):
         self.register("SENSe:VOLTage:DC:NPLCycles", write=self._w_nplc, query=lambda: self.nplc)
         self.register("SYSTem:AZERo", write=self._w_azer, query=self._q_azer)
         self.register("SAMPle:COUNt", write=self._w_samp, query=lambda: float(self.samp_count))
+        self.register("INPut:IMPedance", write=self._w_impedance,
+                      query=lambda: scpi.format_number(self.input_r))
         self.register("INITiate", write=self._w_init)
         self.register("TRACe:DATA", query=self._q_trace)
         self.register("READ", query=self._q_read)
@@ -50,6 +54,7 @@ class MerD610(SCPIDevice):
         self.azer_mode = "ON"
         self.zeroed = True  # continuous autozero holds the offset nulled
         self.samp_count = 1
+        self.input_r = INPUT_R_DEFAULT
         self.buffer_start: Optional[float] = None
         self.buffer_n = 0
         self.buffer_nplc = NPLC_DEFAULT
@@ -114,6 +119,15 @@ class MerD610(SCPIDevice):
             raise ParamOutOfRange(f"SAMP:COUN {n}")
         self.samp_count = n
 
+    def _w_impedance(self, args: List[str]) -> None:
+        v = scpi.parse_number(args[0])
+        for allowed in INPUT_R_ALLOWED:
+            if abs(v - allowed) <= 0.01 * allowed:
+                self.record_state("input_r", self.input_r, allowed)
+                self.input_r = allowed
+                return
+        raise ParamOutOfRange(f"INP:IMP {v}")
+
     def _w_init(self, args: List[str]) -> None:
         self.buffer_start = time.monotonic()
         self.buffer_n = self.samp_count
@@ -152,5 +166,11 @@ class MerD610(SCPIDevice):
     def opc_delay(self) -> float:
         return self._buffer_remaining()
 
+    def get_export(self, field: str) -> float:
+        if field == "r_in":
+            return self.input_r
+        raise KeyError(field)
+
     def state_summary(self):
-        return {"nplc": self.nplc, "azer": self.azer_mode}
+        return {"nplc": self.nplc, "azer": self.azer_mode,
+                "input_r": self.input_r}

@@ -177,6 +177,28 @@ class DeadLegPairDUT(DUT):
         return {"va": self.output("va"), "vb": self.output("vb")}
 
 
+class ResistiveSourceDUT(DUT):
+    """An EMF behind a source resistance. Params: emf, r_src.
+
+    Input: r_load (wire the meter's input impedance export here). Output
+    ``v`` is the loaded terminal voltage emf * R / (R + r_src) - the
+    voltage-divider physics that makes a 10 Mohm meter under-read a
+    100 kohm source by a percent. No load wired means an ideal open
+    circuit.
+    """
+
+    def output(self, field: str, now: Optional[float] = None) -> float:
+        if field == "v":
+            r_load = self.input("r_load", default=float("inf"))
+            if not (r_load > 0) or r_load == float("inf"):
+                return self.params["emf"]
+            return self.params["emf"] * r_load / (r_load + self.params["r_src"])
+        raise KeyError(field)
+
+    def sample_fields(self) -> Dict[str, float]:
+        return {"v": self.output("v")}
+
+
 class ResistorDUT(DUT):
     """Four-terminal resistor with lead resistance. Params: r, r_lead.
 
@@ -356,6 +378,7 @@ DUT_REGISTRY: Dict[str, type] = {
     "const_voltage": ConstVoltageDUT,
     "dead_leg_pair": DeadLegPairDUT,
     "ramp_voltage": RampVoltageDUT,
+    "resistive_source": ResistiveSourceDUT,
     "resistor": ResistorDUT,
     "diode": DiodeDUT,
     "hysteresis": HysteresisDUT,
