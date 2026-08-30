@@ -168,3 +168,21 @@ class TestFarmIntegration:
         p1 = physics.resolve_params(11, "dut1", FARM_CONFIG["farm"]["duts"]["dut1"]["params"])
         p2 = physics.resolve_params(11, "dut1", FARM_CONFIG["farm"]["duts"]["dut1"]["params"])
         assert p1 == p2
+
+
+def test_dead_leg_pair_exactly_one_leg_silent():
+    from osicsim.physics import build_dut
+
+    spec = {"v_a": {"uniform": [0.9, 1.1]}, "v_b": {"uniform": [0.9, 1.1]},
+            "dead_leg": {"choice": [1, 2]}}
+    seen = set()
+    for seed in range(1, 30):
+        d = build_dut("pair1", "dead_leg_pair", seed, spec)
+        va, vb = d.output("va"), d.output("vb")
+        dead = int(round(d.params["dead_leg"]))
+        seen.add(dead)
+        if dead == 1:
+            assert va == 0.0 and 0.9 <= vb <= 1.1
+        else:
+            assert vb == 0.0 and 0.9 <= va <= 1.1
+    assert seen == {1, 2}  # both outcomes occur across seeds

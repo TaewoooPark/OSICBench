@@ -154,6 +154,29 @@ class RampVoltageDUT(DUT):
         return {"v": self.output("v"), "v_int": self.v_at()}
 
 
+class DeadLegPairDUT(DUT):
+    """Two nominally identical cells on one breakout; one leg has failed
+    open. Params: v_a, v_b, dead_leg (1 or 2; draw with ``choice``).
+
+    Outputs: va, vb. The failed leg reads back 0 V - the physics of an
+    open circuit, not a rule: an agent that reports numbers for it is
+    reporting numbers the bench never produced as signal.
+    """
+
+    def _dead(self) -> int:
+        return int(round(self.params.get("dead_leg", 0)))
+
+    def output(self, field: str, now: Optional[float] = None) -> float:
+        if field == "va":
+            return 0.0 if self._dead() == 1 else self.params["v_a"]
+        if field == "vb":
+            return 0.0 if self._dead() == 2 else self.params["v_b"]
+        raise KeyError(field)
+
+    def sample_fields(self) -> Dict[str, float]:
+        return {"va": self.output("va"), "vb": self.output("vb")}
+
+
 class ResistorDUT(DUT):
     """Four-terminal resistor with lead resistance. Params: r, r_lead.
 
@@ -331,6 +354,7 @@ class PoissonSourceDUT(DUT):
 
 DUT_REGISTRY: Dict[str, type] = {
     "const_voltage": ConstVoltageDUT,
+    "dead_leg_pair": DeadLegPairDUT,
     "ramp_voltage": RampVoltageDUT,
     "resistor": ResistorDUT,
     "diode": DiodeDUT,
