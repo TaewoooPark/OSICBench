@@ -239,6 +239,70 @@ def test_no_artifact_records_each_seed_without_content_retry(experiment, monkeyp
     assert len(experiment["calls"]) == 8
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_valid_provider_refusal_is_a_completed_nonpass_not_a_retry(experiment, monkeypatch, exit_code):
+    manifest = _plan(experiment)
+
+    def execute(condition, **kwargs):
+        result = experiment["execute"](condition, **kwargs)
+        if condition["provider"] == "anthropic":
+            (kwargs["workspace"] / "main.py").unlink()
+            result.update(artifact_present=False, artifact_sha256=None, exit_code=exit_code)
+            result["provider_audit"].update(provider_refusal=True, completion_successful=False,
+                                             completion_status="completed_provider_refusal",
+                                             identity_evidence="init_and_refusal_metadata",
+                                             refusal_category="cyber", provider_error="invalid_request")
+        return result
+
+    monkeypatch.setattr(runner.runtime, "execute", execute)
+    result = runner.run_experiment(experiment["out"])
+    assert result["authoring"] == {"completed": 8}
+    assert result["grading"] == {"graded": 8, "failure": 8}
+    assert len(experiment["calls"]) == 8
+    for row in manifest["schedule"]:
+        if row["provider"] == "anthropic":
+            record = runner._read(runner._record_path(experiment["out"], row))
+            assert record["outcome"] == "provider_refusal"
+            assert record["provider_audit"]["completion_successful"] is False
+            assert record["eligible_for_grading"] is True
+            assert len(record["attempts"]) == 1
+            assert (runner._artifact_path(experiment["out"], row) / "brief.md").is_file()
+    runner.run_experiment(experiment["out"])
+    assert len(experiment["calls"]) == 8
+
+
+@pytest.mark.parametrize("violation", ["artifact", "model", "fallback", "quota", "cleanup", "timeout", "exit"])
+def test_invalid_provider_refusal_still_blocks(experiment, monkeypatch, violation):
+    _plan(experiment)
+
+    def execute(condition, **kwargs):
+        result = experiment["execute"](condition, **kwargs)
+        if condition["provider"] == "anthropic":
+            result["provider_audit"].update(provider_refusal=True, completion_successful=False)
+            if violation != "artifact":
+                (kwargs["workspace"] / "main.py").unlink()
+                result.update(artifact_present=False, artifact_sha256=None)
+            if violation == "model":
+                result["provider_audit"]["resolved_model"] = "other"
+            elif violation == "fallback":
+                result["provider_audit"].update(valid=False, errors=["unexpected_primary_model"])
+            elif violation == "quota":
+                result["provider_audit"]["rate_limit"] = {"detected": True}
+            elif violation == "cleanup":
+                result["cleanup_error"] = "PermissionError"
+            elif violation == "timeout":
+                result["timed_out"] = True
+            elif violation == "exit":
+                result["exit_code"] = 2
+        return result
+
+    monkeypatch.setattr(runner.runtime, "execute", execute)
+    result = runner.run_experiment(experiment["out"])
+    assert result["providers"]["anthropic"]["status"] == "stopped"
+    assert result["grading"] == {"graded": 4, "missing": 12}
+    assert Counter(c[0] for c in experiment["calls"]) == {"alpha": 2, "beta": 1}
+
+
 @pytest.mark.parametrize("violation", ["quota", "model", "effort", "cleanup", "process"])
 def test_stopped_provider_keeps_missing_rows_and_blocks_later_samples(experiment, monkeypatch, violation):
     _plan(experiment)
@@ -407,6 +471,130 @@ def test_concurrent_evaluator_is_rejected_before_calls(experiment):
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(ValueError, match="another evaluator"):
             runner.run_experiment(experiment["out"])
+    assert experiment["calls"] == []
+
+
+def test_stop_request_waits_for_active_calls_and_requires_explicit_resume(experiment, monkeypatch):
+    _plan(experiment)
+    entered = {provider: threading.Event() for provider in ("openai", "anthropic")}
+    release, results, errors = threading.Event(), [], []
+
+    def execute(condition, **kwargs):
+        entered[condition["provider"]].set()
+        assert release.wait(5), "test release was not signalled"
+        return experiment["execute"](condition, **kwargs)
+
+    def run():
+        try:
+            results.append(runner.run_experiment(experiment["out"], grade_completed=False))
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(runner.runtime, "execute", execute)
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert all(event.wait(5) for event in entered.values())
+        request = runner.request_stop(experiment["out"])
+        assert request["providers"] == ["anthropic", "openai"]
+        pending = runner.status(experiment["out"])["stop_requests"]["pending_by_provider"]
+        assert all(request["request_id"] in ids for ids in pending.values())
+        assert thread.is_alive()
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+    assert results[0]["authoring"] == {"completed": 2, "deferred": 6}
+    assert {p["status"] for p in results[0]["providers"].values()} == {"paused"}
+    assert len(experiment["calls"]) == 2
+    runner.run_experiment(experiment["out"], grade_completed=False)
+    assert len(experiment["calls"]) == 2
+    resumed = runner.run_experiment(experiment["out"], ("openai", "anthropic"), grade_completed=False)
+    assert resumed["authoring"] == {"completed": 8}
+    assert len(experiment["calls"]) == 8
+    state = runner._read(experiment["out"] / "orchestration.json")
+    assert all(request["request_id"] in ids for ids in state["control_acknowledgements"].values())
+    assert all(p["explicitly_resumed_from"]["status"] == "paused" for p in state["providers"].values())
+
+
+def test_paused_authoring_does_not_prevent_grading_frozen_programs(experiment):
+    _plan(experiment)
+    runner.run_experiment(experiment["out"], grade_completed=False)
+    runner.request_stop(experiment["out"])
+    result = runner.run_experiment(experiment["out"])
+    assert result["grading"] == {"graded": 16}
+    assert len(experiment["calls"]) == 8
+    assert all(provider["status"] == "paused" for provider in result["providers"].values())
+
+
+def test_pause_at_launch_retry_boundary_does_not_start_another_call(experiment, monkeypatch):
+    _plan(experiment)
+    failed_launches = []
+
+    def execute(condition, **kwargs):
+        if condition["provider"] == "openai":
+            failed_launches.append(kwargs["workspace"])
+            runner.request_stop(experiment["out"], ("openai",))
+            return {"launch_error": "FileNotFoundError", "exit_code": None,
+                    "artifact_present": False, "artifact_sha256": None, "wall_s": 0,
+                    "provider_audit": {"valid": False, "errors": ["model_unverified"]}}
+        return experiment["execute"](condition, **kwargs)
+
+    monkeypatch.setattr(runner.runtime, "execute", execute)
+    result = runner.run_experiment(experiment["out"], grade_completed=False)
+    assert len(failed_launches) == 1
+    assert result["providers"]["openai"]["status"] == "paused"
+    records = list((experiment["out"] / "authoring" / "alpha").glob("*.json"))
+    assert runner._read(records[0])["status"] == "blocked"
+
+
+def test_targeted_pause_does_not_stop_other_provider_current_wave(experiment):
+    _plan(experiment)
+    request = runner.request_stop(experiment["out"], ("anthropic",))
+    result = runner.run_experiment(experiment["out"], grade_completed=False)
+    assert request["providers"] == ["anthropic"]
+    assert result["providers"]["anthropic"]["status"] == "paused"
+    assert result["providers"]["openai"]["status"] == "ready"
+    assert Counter(c[0] for c in experiment["calls"]) == {"alpha": 2}
+    assert not list((experiment["out"] / "authoring" / "beta").glob("*.json"))
+
+
+def test_pause_arriving_during_precheck_defers_without_staging_or_invocation(experiment, monkeypatch):
+    manifest = _plan(experiment)
+    requested = []
+
+    def precheck(condition):
+        if condition["provider"] == "openai" and not requested:
+            requested.append(runner.request_stop(experiment["out"], ("openai",)))
+        return {"allowed": True, "remaining_percent": 50}
+
+    monkeypatch.setattr(runner, "_subscription_check", precheck)
+    result = runner.run_experiment(experiment["out"], grade_completed=False)
+    row = next(row for row in manifest["schedule"] if row["provider"] == "openai")
+    record = runner._read(runner._record_path(experiment["out"], row))
+    assert result["providers"]["openai"]["status"] == "paused"
+    assert record["status"] == "deferred" and record["attempts"] == []
+    assert len(record["subscription_prechecks"]) == 1
+    for directory in ("workspaces", "runtimes", "logs"):
+        assert not (experiment["out"] / "private" / directory / row["label"] / row["task"]).exists()
+    assert Counter(c[0] for c in experiment["calls"]) == {"beta": 2}
+    result = runner.run_experiment(experiment["out"], ("openai",), grade_completed=False)
+    assert result["authoring"] == {"completed": 8}
+    record = runner._read(runner._record_path(experiment["out"], row))
+    assert len(record["attempts"]) == 1 and len(record["subscription_prechecks"]) == 2
+    assert len(experiment["calls"]) == 8
+
+
+@pytest.mark.parametrize("field,value", [("action", "execute"), ("plan_sha256", "other"),
+                                        ("providers", ["unknown"]), ("requested_at", "invalid")])
+def test_invalid_stop_requests_fail_closed_before_any_calls(experiment, field, value):
+    _plan(experiment)
+    request = runner.request_stop(experiment["out"])
+    request[field] = value
+    path = experiment["out"] / "control" / "stop-requests" / f"{request['request_id']}.json"
+    runner.runtime.write_json(path, request)
+    with pytest.raises(ValueError, match="stop request"):
+        runner.run_experiment(experiment["out"], grade_completed=False)
     assert experiment["calls"] == []
 
 

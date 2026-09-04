@@ -248,3 +248,153 @@ def test_grading_infrastructure_failures_reject_stale_grades(tmp_path, field):
     _write(path, adapter)
     with pytest.raises(publish.ExportError, match="unresolved_grading_failure"):
         publish.export_bundle(root, tasks, output)
+
+
+def _publication_refusal(root, row):
+    record = {**row, "status": "completed", "outcome": "provider_refusal", "eligible_for_grading": True,
+              "artifact_present": False, "artifact_sha256": None, "wall_s": 4.5,
+              "attempts": [{"timed_out": False, "error": "/Users/private/error"}],
+              "provider_audit": {"valid": True, "provider_refusal": True, "completion_successful": False,
+                                 "completion_status": "completed_provider_refusal",
+                                 "identity_evidence": "init_and_refusal_metadata",
+                                 "requested_model": "model", "resolved_model": "model", "requested_effort": "low",
+                                 "effort_verification": "launch_configuration_only", "primary_models": ["model"],
+                                 "refusal_category": "cyber", "provider_error": "invalid_request",
+                                 "provider_error_status": None, "usage": {"input_tokens": 12},
+                                 "provider_refusal_details": {"category": "cyber", "provider_error": "invalid_request",
+                                                              "provider_error_status": None, "terminal_reason": "api_error",
+                                                              "system_subtype": "model_refusal_no_fallback", "original_model": "model",
+                                                              "explanation": "/Users/private/explanation"}}}
+    _write(root / "authoring/model-low/t01.json", record)
+    return record
+
+
+def test_refusal_publication_keeps_failure_provenance_without_fabricating_grades(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    _publication_refusal(root, row)
+    _write(run / "failure.json", {**row, "reason": "missing_author_artifact", "stage": "authoring",
+                                  "error": "/Users/private/failure"})
+    result = publish.export_bundle(root, tasks, output)
+    assert result["status"] == "complete" and not result["fully_graded"]
+    author = json.loads((output / "authoring/model-low/t01.json").read_text())
+    assert author["outcome"] == "provider_refusal" and author["artifact_present"] is False
+    assert author["provider_audit"]["completion_successful"] is False
+    assert author["provider_audit"]["refusal_category"] == "cyber"
+    assert author["provider_audit"]["identity_evidence"] == "init_and_refusal_metadata"
+    assert "explanation" not in json.dumps(author)
+    failure = json.loads((output / "model-low/t01_s19/failure.json").read_text())
+    assert failure["reason"] == "missing_author_artifact" and failure["stage"] == "authoring"
+    analysis = json.loads((output / "analysis/analysis.json").read_text())
+    condition = analysis["conditions"]["model-low"]
+    assert condition["authoring"]["provider_refusal_records"] == 1
+    assert condition["authoring"]["token_usage"]["input_tokens"]["total"] == 12
+    assert condition["metrics"]["dfs"]["mean"] is None
+    assert not list(output.rglob("grade.json")) and not list(output.rglob("main.py"))
+
+
+def test_imported_record_chain_exports_hashes_not_receipt_contents(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    manifest_path = root / "evaluation_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    record = _publication_refusal(root, manifest["expected_runs"][0])
+    record["migration"] = {"schema_version": 1, "source_plan_sha256": "a" * 64,
+                           "source_record_sha256": "b" * 64, "source_record_file_sha256": "c" * 64,
+                           "original_status": "blocked", "outcome_reclassified": True,
+                           "call_ids": ["model-low/t01/attempt-1"], "private_source": "/Users/private/source"}
+    source_author = root / "authoring/model-low/t01.json"
+    _write(source_author, record)
+    manifest["migration"] = {"schema_version": 1, "amendment_id": "refusal-audit-v1",
+                             "source_plan_sha256": "a" * 64, "source_manifest_file_sha256": "d" * 64,
+                             "private_source": "/Users/private/source"}
+    _write(manifest_path, manifest)
+    _write(root / "migration_receipt.json", {"private": "/Users/private/receipt"})
+    summary = publish.export_bundle(root, tasks, output)
+    author = json.loads((output / "authoring/model-low/t01.json").read_text())
+    assert author["private_record_file_sha256"] == hashlib.sha256(source_author.read_bytes()).hexdigest()
+    assert author["private_record_sha256"] == record["record_sha256"]
+    assert author["migration"]["source_record_sha256"] == "b" * 64
+    assert author["migration"]["source_record_file_sha256"] == "c" * 64
+    assert summary["private_migration_receipt_sha256"] == hashlib.sha256((root / "migration_receipt.json").read_bytes()).hexdigest()
+    assert not (output / "migration_receipt.json").exists()
+    encoded = "\n".join(path.read_text() for path in output.rglob("*") if path.is_file())
+    assert "/Users/" not in encoded and "private_source" not in encoded
+
+
+@pytest.mark.parametrize("field,value", [("source_record_sha256", "/Users/private/record"),
+                                         ("call_ids", ["../../private"]),
+                                         ("call_ids", ["another-label/t01/attempt-1"])])
+def test_invalid_imported_record_hash_or_call_identity_rejects_export(tmp_path, field, value):
+    root, tasks, output, _ = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = _publication_refusal(root, row)
+    record["migration"] = {"schema_version": 1, "source_plan_sha256": "a" * 64,
+                           "source_record_sha256": "b" * 64, "source_record_file_sha256": "c" * 64,
+                           "original_status": "blocked", "outcome_reclassified": True,
+                           "call_ids": ["model-low/t01/attempt-1"]}
+    record["migration"][field] = value
+    _write(root / "authoring/model-low/t01.json", record)
+    with pytest.raises(publish.ExportError) as error:
+        publish.export_bundle(root, tasks, output)
+    assert "/Users/" not in str(error.value) and not output.exists()
+
+
+def test_refusal_with_changed_sealed_record_is_rejected(tmp_path):
+    root, tasks, output, _ = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = _publication_refusal(root, row)
+    record["wall_s"] = 900
+    (root / "authoring/model-low/t01.json").write_text(json.dumps(record))
+    with pytest.raises(publish.ExportError, match="author_record_hash_mismatch"):
+        publish.export_bundle(root, tasks, output)
+
+
+@pytest.mark.parametrize("seal", [None, "missing"])
+def test_completed_refusal_requires_a_sealed_record(tmp_path, seal):
+    root, tasks, output, _ = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = _publication_refusal(root, row)
+    if seal == "missing":
+        record.pop("record_sha256")
+    else:
+        record["record_sha256"] = seal
+    (root / "authoring/model-low/t01.json").write_text(json.dumps(record))
+    with pytest.raises(publish.ExportError, match="completed_author_missing_sealed_digest"):
+        publish.export_bundle(root, tasks, output)
+
+
+def test_unsealed_historical_running_record_remains_an_incomplete_snapshot(tmp_path):
+    root, tasks, output, _ = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    path = root / "authoring/model-low/t01.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({**row, "status": "running", "attempts": []}))
+    result = publish.export_bundle(root, tasks, output)
+    author = json.loads((output / "authoring/model-low/t01.json").read_text())
+    assert result["status"] == "incomplete" and author["status"] == "running"
+    assert "private_record_sha256" not in author
+
+
+@pytest.mark.parametrize("violation", [None, "calls", "attempts", "reclassification"])
+def test_deferred_import_requires_zero_execution_evidence(tmp_path, violation):
+    root, tasks, output, _ = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = {**row, "status": "deferred", "attempts": [], "artifact_present": False,
+              "artifact_sha256": None, "eligible_for_grading": False,
+              "migration": {"schema_version": 1, "source_plan_sha256": "a" * 64,
+                            "source_record_sha256": "b" * 64, "source_record_file_sha256": "c" * 64,
+                            "original_status": "deferred", "outcome_reclassified": False, "call_ids": []}}
+    if violation == "calls":
+        record["migration"]["call_ids"] = ["model-low/t01/attempt-1"]
+    elif violation == "attempts":
+        record["attempts"] = [{"timed_out": False}]
+    elif violation == "reclassification":
+        record["migration"]["outcome_reclassified"] = True
+    _write(root / "authoring/model-low/t01.json", record)
+    if violation is not None:
+        with pytest.raises(publish.ExportError):
+            publish.export_bundle(root, tasks, output)
+    else:
+        publish.export_bundle(root, tasks, output)
+        author = json.loads((output / "authoring/model-low/t01.json").read_text())
+        assert author["status"] == "deferred" and author["migration"]["call_ids"] == []

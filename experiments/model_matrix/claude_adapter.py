@@ -100,6 +100,60 @@ def _numeric_usage(value):
     return value
 
 
+def _native_refusal(events: list[dict], inits: list[dict], finals: list[dict], model: str) -> dict | None:
+    """Recognize only the native no-fallback policy-refusal envelope.
+
+    A synthetic error message is not a model identity. The exception requires
+    matching initialization, original-model and usage evidence, a consistent
+    refusal category, and the native terminal error. Explanations, request IDs,
+    and generated content are intentionally not copied into the audit.
+    """
+    refusals = [event for event in events if event.get("type") == "system"
+                and event.get("subtype") == "model_refusal_no_fallback"]
+    if len(inits) != 1 or len(finals) != 1 or len(refusals) != 1:
+        return None
+    init, final, refusal = inits[0], finals[0], refusals[0]
+    category = refusal.get("api_refusal_category")
+    model_usage = final.get("modelUsage")
+    if (init.get("model") != model or refusal.get("original_model") != model
+            or not isinstance(category, str) or re.fullmatch(r"[A-Za-z0-9_-]+", category) is None
+            or final.get("subtype") != "success" or final.get("is_error") is not True
+            or final.get("stop_reason") != "refusal" or final.get("terminal_reason") != "api_error"
+            or not isinstance(model_usage, dict) or not isinstance(model_usage.get(model), dict)):
+        return None
+    synthetic = []
+    for event in events:
+        if event.get("type") not in ("assistant", "result") and event not in inits:
+            continue
+        message = event.get("message") if event.get("type") == "assistant" else None
+        records = [event] + ([message] if isinstance(message, dict) else [])
+        for record in records:
+            observed = record.get("model")
+            if observed and observed not in (model, "<synthetic>"):
+                return None
+            if observed == "<synthetic>" and (event.get("type") != "assistant" or record is not message):
+                return None
+        if isinstance(message, dict) and message.get("model") == "<synthetic>":
+            details = message.get("stop_details")
+            if (event.get("is_api_error_message") is not True or event.get("error") != "invalid_request"
+                    or message.get("stop_reason") != "refusal" or not isinstance(details, dict)
+                    or details.get("type") != "refusal" or details.get("category") != category):
+                return None
+            synthetic.append(event)
+    if len(synthetic) != 1:
+        return None
+    if not (events.index(init) < events.index(refusal) < events.index(synthetic[0]) < events.index(final)):
+        return None
+    status = final.get("api_error_status")
+    # The verified native refusal has no HTTP error status. Do not reinterpret
+    # explicit authentication, quota, server, or unverified HTTP errors.
+    if status is not None:
+        return None
+    return {"category": category, "provider_error": synthetic[0]["error"],
+            "provider_error_status": status, "terminal_reason": final["terminal_reason"],
+            "system_subtype": refusal["subtype"], "original_model": refusal["original_model"]}
+
+
 def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
                   *, allow_incomplete: bool = False) -> dict:
     """Validate isolation, exact primary identity, completion, and usage.
@@ -110,6 +164,8 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
     set ``allow_incomplete`` for its declared authoring deadline artifact rule:
     this tolerates a missing final event only, not an explicit failure or any
     identity, authentication, isolation, fallback, or trace integrity error.
+    A fully evidenced native policy refusal is a completed provider outcome,
+    not a successful answer. It does not relax any configuration checks.
     The caller must independently establish the deadline and freeze the artifact.
     """
     errors, warnings, events = [], [], []
@@ -139,6 +195,10 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
     if allow_incomplete and not finals:
         warnings.append("authoring_incomplete_final_event_missing")
     init, final = (inits[0] if inits else {}), (finals[-1] if finals else {})
+    refusal = _native_refusal(events, inits, finals, model)
+    if any(event.get("type") == "system" and event.get("subtype") == "model_refusal_no_fallback"
+           for event in events) and refusal is None:
+        errors.append("native_provider_refusal_unverified")
     for field in ("plugins", "skills", "mcp_servers", "slash_commands"):
         if init.get(field) != []:
             errors.append(f"unexpected_or_missing_{field}")
@@ -164,7 +224,8 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
                         tool_names.add(str(item.get("name")))
         for record in records:
             if (kind in ("assistant", "result") or event in inits) and record.get("model"):
-                primary.add(str(record["model"]))
+                if not (refusal is not None and record["model"] == "<synthetic>"):
+                    primary.add(str(record["model"]))
             for key in ("effort", "effortLevel", "effort_level"):
                 value = record.get(key)
                 if isinstance(value, str) and value in EFFORTS:
@@ -172,7 +233,9 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
             if any("fallback" in key.lower() and bool(value)
                    for key, value in record.items() if isinstance(key, str)):
                 errors.append("model_fallback_observed")
-        if any("fallback" in str(event.get(key, "")).lower() for key in ("type", "subtype")):
+        native_no_fallback = kind == "system" and event.get("subtype") == "model_refusal_no_fallback"
+        if not native_no_fallback and any("fallback" in str(event.get(key, "")).lower()
+                                          for key in ("type", "subtype")):
             errors.append("model_fallback_observed")
         if kind == "rate_limit_event":
             info = event.get("rate_limit_info")
@@ -194,7 +257,7 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
         warnings.append("effective_effort_not_in_trace")
     completion_successful = (len(finals) == 1 and final.get("subtype") == "success"
                              and final.get("is_error") is False)
-    if not completion_successful and not (allow_incomplete and not finals):
+    if not completion_successful and refusal is None and not (allow_incomplete and not finals):
         errors.append("completion_not_successful")
     if any(rate.get("status") not in (None, "allowed") for rate in rates):
         errors.append("rate_limit_not_allowed")
@@ -213,9 +276,18 @@ def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
         warnings.append("stderr_present_review_raw_private_trace")
     model_usage = final.get("modelUsage") if isinstance(final.get("modelUsage"), dict) else {}
     errors = list(dict.fromkeys(errors))
+    provider_refusal = refusal is not None and not errors
     return {
         "valid": not errors, "errors": errors, "warnings": warnings,
         "completion_successful": completion_successful,
+        "completion_status": ("completed_provider_refusal" if provider_refusal else
+                              "completed_successfully" if completion_successful else "incomplete_or_error"),
+        "provider_refusal": provider_refusal,
+        "refusal_category": refusal["category"] if refusal is not None else None,
+        "provider_error": refusal["provider_error"] if refusal is not None else None,
+        "provider_error_status": refusal["provider_error_status"] if refusal is not None else None,
+        "provider_refusal_details": refusal,
+        "identity_evidence": "init_and_refusal_metadata" if provider_refusal else "trace_primary_models",
         "incomplete_trace_accepted": bool(allow_incomplete and not finals and not errors),
         "requested_model": model,
         "resolved_model": next(iter(primary)) if len(primary) == 1 else None,

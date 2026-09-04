@@ -23,6 +23,8 @@ TOKEN_FIELDS = {
     "input_tokens", "output_tokens", "total_tokens", "cached_input_tokens",
     "cache_creation_input_tokens", "cache_read_input_tokens", "reasoning_output_tokens",
 }
+COMPLETION_STATES = {"completed_provider_refusal", "completed_successfully", "incomplete_or_error"}
+IDENTITY_EVIDENCE = {"init_and_refusal_metadata", "trace_primary_models"}
 CAVEATS = [
     "This is a public-development-set evaluation, not a private held-out leaderboard result.",
     "Cross-provider comparisons concern model-plus-native-harness configurations, not isolated model effects or equal inference compute.",
@@ -33,6 +35,7 @@ CAVEATS = [
     "DFS/HSS/RS and transaction summaries use observed grades only. RS coverage counts only rows where the oracle reported RS; missing RS is not zero.",
     "HSS-applicable summaries include only tasks with nonempty task.yaml safety rules; no safety claim is made for undeclared hazards.",
     "Provider-reported tokens or price estimates do not establish subscription billing. Unavailable costs are not inferred from elapsed time.",
+    "Provider refusals without submissions are operational nonpasses, not graded evidence of instrument-control competence. Their DFS/HSS/RS and transaction counts remain unmeasured, not zero.",
 ]
 
 
@@ -48,6 +51,101 @@ def _number(value: object, field: str) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError(f"{field} must be a finite number or null")
     return float(value)
+
+
+def public_completion(audit: dict) -> dict:
+    """Allowlist completion provenance, with strict native-refusal consistency."""
+    result = {}
+    for field in ("provider_refusal", "completion_successful"):
+        if field in audit:
+            if type(audit[field]) is not bool:
+                raise ValueError("Completion flags must be boolean")
+            result[field] = audit[field]
+    for field, choices in (("completion_status", COMPLETION_STATES), ("identity_evidence", IDENTITY_EVIDENCE)):
+        if field in audit:
+            if not isinstance(audit[field], str) or audit[field] not in choices:
+                raise ValueError("Unsupported completion provenance")
+            result[field] = audit[field]
+    if audit.get("provider_refusal") is True:
+        if (audit.get("valid") is not True or audit.get("completion_successful") is not False
+                or audit.get("completion_status") != "completed_provider_refusal"
+                or audit.get("identity_evidence") != "init_and_refusal_metadata"
+                or audit.get("provider_error") != "invalid_request" or audit.get("errors")):
+            raise ValueError("Inconsistent provider refusal completion")
+        category = _identity(audit.get("refusal_category"))
+        model = _identity(audit.get("requested_model"))
+        if audit.get("resolved_model") != model:
+            raise ValueError("Refusal model identity mismatch")
+        details = audit.get("provider_refusal_details")
+        if (not isinstance(details, dict) or details.get("category") != category
+                or details.get("provider_error") != "invalid_request"
+                or details.get("system_subtype") != "model_refusal_no_fallback"
+                or details.get("terminal_reason") != "api_error" or details.get("original_model") != model):
+            raise ValueError("Inconsistent provider refusal metadata")
+        status = audit.get("provider_error_status")
+        if status is not None:
+            raise ValueError("A nonnull HTTP error cannot be treated as the supported native refusal")
+        if details.get("provider_error_status") != status:
+            raise ValueError("Provider error status mismatch")
+        result.update(refusal_category=category, provider_error="invalid_request", provider_error_status=status,
+                      provider_refusal_details={"category": category, "provider_error": "invalid_request",
+                                               "provider_error_status": status, "terminal_reason": "api_error",
+                                               "system_subtype": "model_refusal_no_fallback", "original_model": model})
+    elif audit.get("completion_status") == "completed_provider_refusal":
+        raise ValueError("Refusal completion requires an explicit refusal flag")
+    return result
+
+
+def public_migration(value: dict) -> dict:
+    """Retain imported-record hash links without private paths or raw receipts."""
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("Invalid migration provenance")
+    out = {"schema_version": 1}
+    for field in ("source_plan_sha256", "source_record_sha256", "source_record_file_sha256"):
+        digest = value.get(field)
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("Invalid imported-record digest")
+        out[field] = digest
+    if value.get("original_status") not in {"completed", "blocked", "running", "retry_pending", "deferred"} or type(value.get("outcome_reclassified")) is not bool:
+        raise ValueError("Invalid imported-record status")
+    out.update(original_status=value["original_status"], outcome_reclassified=value["outcome_reclassified"])
+    calls = value.get("call_ids")
+    if not isinstance(calls, list):
+        raise ValueError("Migration calls must be a list")
+    if value["original_status"] == "deferred" and (calls or value["outcome_reclassified"]):
+        raise ValueError("Deferred migration must have no calls or outcome reclassification")
+    out["call_ids"] = []
+    for call in calls:
+        if not isinstance(call, str) or len(call.split("/")) != 3:
+            raise ValueError("Invalid neutral call identifier")
+        label, task, attempt = call.split("/")
+        _identity(label)
+        _identity(task)
+        if re.fullmatch(r"attempt-[1-9][0-9]*", attempt) is None:
+            raise ValueError("Invalid neutral call identifier")
+        out["call_ids"].append(call)
+    return out
+
+
+def author_outcome(record: dict) -> str | None:
+    """Historical records need not have outcomes; declared refusals must agree."""
+    audit = record.get("provider_audit", {})
+    completion = public_completion(audit) if isinstance(audit, dict) else {}
+    outcome = record.get("outcome")
+    if record.get("status") == "deferred" and (record.get("attempts") or record.get("artifact_present")
+                                                or record.get("artifact_sha256") is not None or outcome is not None):
+        raise ValueError("Deferred authoring records cannot contain an attempt, artifact, or outcome")
+    if outcome is not None and outcome != "provider_refusal":
+        raise ValueError("Unsupported declared authoring outcome")
+    refused = completion.get("provider_refusal") is True
+    if outcome == "provider_refusal" and not refused:
+        raise ValueError("Provider refusal outcome lacks matching audit evidence")
+    if refused:
+        if (record.get("status") != "completed" or record.get("eligible_for_grading") is not True
+                or record.get("artifact_present") is not False or record.get("artifact_sha256") is not None):
+            raise ValueError("Provider refusal requires a completed no-artifact authoring outcome")
+        return "provider_refusal"
+    return None
 
 
 def _spread(values: list[float]) -> dict:
@@ -106,20 +204,29 @@ def _task_metadata(tasks_root: Path, task_ids: list[str]) -> dict:
 
 def _run_rows(root: Path, expected: list[dict], report: dict) -> list[dict]:
     missing = {(r["label"], r["task"], r["seed"]): r for r in report["missing_results"]}
-    out = []
+    out, outcomes = [], {}
     for planned in sorted(expected, key=lambda r: (r["condition"], r["sample"], r["task"], r["seed"])):
         row = {key: planned[key] for key in ("condition", "sample", "label", "task", "seed")}
         key = row["label"], row["task"], row["seed"]
         absent = missing.get(key)
         grade = None if absent else json.loads((root / row["label"] / f"{row['task']}_s{row['seed']}" / "grade.json").read_text())
+        author_key = row["label"], row["task"]
+        if author_key not in outcomes:
+            author = root / "authoring" / row["label"] / f"{row['task']}.json"
+            outcomes[author_key] = author_outcome(json.loads(author.read_text())) if author.exists() else None
+        if outcomes[author_key] == "provider_refusal" and grade is not None:
+            raise ValueError("A no-artifact provider refusal cannot have instrument grades")
         row.update(status=absent["status"] if absent else "graded",
                    passed=False if absent else grade["pass"],
                    failure_reason=None, hss_findings_observed=False,
                    hss_failed_rules=None, hss_required_failed_rules=None)
+        row.update(authoring_outcome=outcomes[author_key], provider_refusal=outcomes[author_key] == "provider_refusal")
         if absent:
             reason = absent.get("failure", {}).get("reason")
             row["failure_reason"] = (reason if reason in FAILURE_REASONS else
                                      "other_recorded_failure" if reason is not None else "not_recorded")
+            if row["provider_refusal"] and reason is not None and reason != "missing_author_artifact":
+                raise ValueError("Provider refusal failure accounting must preserve missing_author_artifact")
         for field in ("dfs", "hss", "rs", "transactions"):
             row[field] = _number(grade.get(field), field) if grade is not None else None
         row["fabricated"] = bool(grade.get("fabricated")) if grade else None
@@ -149,6 +256,8 @@ def _coverage(rows: list[dict]) -> dict:
             "observed_passes": sum(row["passed"] for row in graded),
             "observed_failures": sum(not row["passed"] for row in graded),
             "missing_runs_or_grades": len(rows) - len(graded),
+            "provider_refusal_runs": sum(row["provider_refusal"] for row in rows),
+            "provider_refusal_missing_artifact_failures": sum(row["provider_refusal"] and row["failure_reason"] == "missing_author_artifact" for row in rows),
             "failure_reasons": dict(sorted(Counter(row["failure_reason"] for row in rows
                                                     if row["failure_reason"] is not None).items()))}
 
@@ -169,6 +278,7 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
     identities = sorted({(r["label"], r["task"]) for r in expected})
     times, attempts, timed_out, records, audits = [], 0, 0, 0, 0
     audit_valid, audit_invalid, rate_limited = 0, 0, 0
+    refusals, migrated, refusal_categories = [], [], Counter()
     model_fields = {key: set() for key in ("requested_model", "requested_effort",
                                          "resolved_model", "resolved_effort", "observed_primary_models")}
     token_values = {key: [] for key in TOKEN_FIELDS}
@@ -180,6 +290,13 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
         if not isinstance(record, dict) or record.get("label", label) != label or record.get("task", task) != task:
             raise ValueError("Authoring record identity mismatch")
         records += 1
+        outcome = author_outcome(record)
+        if outcome == "provider_refusal":
+            completion = public_completion(record["provider_audit"])
+            refusal_categories[completion["refusal_category"]] += 1
+            refusals.append({"label": label, "task": task, **completion})
+        if "migration" in record:
+            migrated.append({"label": label, "task": task, **public_migration(record["migration"])})
         wall_s = _number(record.get("wall_s"), "authoring wall_s")
         if wall_s is not None:
             if wall_s < 0:
@@ -198,6 +315,8 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
             rate_limited += audit.get("rate_limited") is True
             for key in model_fields:
                 values = audit.get(key, []) if key == "observed_primary_models" else [audit.get(key)]
+                if key == "observed_primary_models" and isinstance(values, list) and isinstance(audit.get("primary_models"), list):
+                    values = values + audit["primary_models"]
                 if isinstance(values, list):
                     model_fields[key].update(value for value in values
                                              if isinstance(value, str) and IDENTITY.fullmatch(value))
@@ -215,6 +334,9 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
             "timed_out_attempts_observed": timed_out, "provider_audit_records_observed": audits,
             "provider_audit_valid_records": audit_valid, "provider_audit_invalid_records": audit_invalid,
             "provider_rate_limited_records": rate_limited,
+            "provider_refusal_records": len(refusals),
+            "provider_refusal_categories": dict(sorted(refusal_categories.items())),
+            "provider_refusals": refusals, "imported_records": migrated,
             "provider_model_observations": {key: sorted(values) for key, values in model_fields.items()},
             "token_usage": {key: {"total": sum(values), "observed_artifacts": len(values)}
                             for key, values in sorted(token_values.items()) if values} or None,
@@ -377,12 +499,12 @@ def render_markdown(analysis: dict) -> str:
         lines.append(f"| {contrast['id']} | {100 * spread['mean']:.2f} pp | {stddev} "
                      f"| [{100 * spread['min']:.2f}, {100 * spread['max']:.2f}] pp |")
     lines.extend(["", "## Authoring coverage", "",
-                  "| Condition | Records / planned artifacts | Timed-out attempts | Observed wall seconds | Timing coverage |",
-                  "|---|---|---|---|---|"])
+                  "| Condition | Records / planned artifacts | Provider refusals | Timed-out attempts | Observed wall seconds | Timing coverage |",
+                  "|---|---|---|---|---|---|"])
     for condition, item in analysis["conditions"].items():
         author = item["authoring"]
         lines.append(f"| {condition} | {author['records_observed']}/{author['planned_artifacts']} "
-                     f"| {author['timed_out_attempts_observed']} | {_formatted(author['wall_s_total'])} "
+                     f"| {author['provider_refusal_records']} | {author['timed_out_attempts_observed']} | {_formatted(author['wall_s_total'])} "
                      f"| {author['wall_s_observed_artifacts']}/{author['planned_artifacts']} |")
     lines.extend(["", "## Interpretation and limitations", ""])
     lines.extend(f"- {caveat}" for caveat in analysis["caveats"])

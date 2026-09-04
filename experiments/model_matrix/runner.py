@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,17 +172,69 @@ def plan_experiment(out: Path, cases_path: Path, preflight_root: Path,
     return manifest
 
 
-def _verify_plan(out: Path) -> dict:
+def _sealed_plan(out: Path) -> dict:
     manifest = _read(out / "evaluation_manifest.json")
     unsigned = {k: v for k, v in manifest.items() if k != "plan_sha256"}
     if manifest.get("plan_sha256") != _digest(unsigned):
         raise ValueError("frozen plan has changed")
     validate_evaluation_manifest(manifest)
+    return manifest
+
+
+def _verify_plan(out: Path) -> dict:
+    manifest = _sealed_plan(out)
     if (manifest["source_sha256"] != runtime.source_hash()
             or manifest["benchmark_sha256"] != matrix._benchmark_hash()
             or manifest["benchmark_commit"] != _commit()):
         raise ValueError("benchmark or experiment implementation changed after planning")
     return manifest
+
+
+def _stop_requests(out: Path, manifest: dict) -> list[dict]:
+    """Read data-only control receipts; malformed requests fail closed."""
+    providers = {condition["provider"] for condition in manifest["conditions"]}
+    directory = out / "control" / "stop-requests"
+    if directory.is_symlink() or directory.parent.is_symlink():
+        raise ValueError("control request directories must not be symlinks")
+    requests = []
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+            raise ValueError("invalid stop request file")
+        request = _read(path)
+        fields = {"schema_version", "plan_sha256", "request_id", "requested_at", "action", "providers"}
+        if not isinstance(request, dict) or set(request) != fields:
+            raise ValueError("invalid stop request schema")
+        targets = request["providers"]
+        try:
+            identifier = str(uuid.UUID(request["request_id"]))
+            timestamp = datetime.fromisoformat(request["requested_at"])
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("invalid stop request identity or timestamp") from exc
+        if (type(request["schema_version"]) is not int or request["schema_version"] != 1
+                or request["plan_sha256"] != manifest["plan_sha256"] or request["action"] != "pause"
+                or path.stem != identifier or request["request_id"] != identifier
+                or timestamp.tzinfo is None or not isinstance(targets, list) or not targets
+                or any(not isinstance(target, str) or target not in providers for target in targets)
+                or len(set(targets)) != len(targets)):
+            raise ValueError("stop request does not match the frozen experiment")
+        requests.append(request)
+    return requests
+
+
+def request_stop(out: Path, providers: tuple[str, ...] = ()) -> dict:
+    """Ask selected workers to pause after their active calls, without signals."""
+    out = out.resolve()
+    manifest = _sealed_plan(out)
+    known = {condition["provider"] for condition in manifest["conditions"]}
+    selected = sorted(set(providers) if providers else known)
+    if not set(selected) <= known:
+        raise ValueError("unknown provider requested for pause")
+    _stop_requests(out, manifest)
+    request = {"schema_version": 1, "plan_sha256": manifest["plan_sha256"],
+               "request_id": str(uuid.uuid4()), "requested_at": datetime.now(timezone.utc).isoformat(),
+               "action": "pause", "providers": selected}
+    runtime.write_json(out / "control" / "stop-requests" / f"{request['request_id']}.json", request)
+    return request
 
 
 def _record_path(out: Path, row: dict) -> Path:
@@ -303,6 +356,17 @@ def _stop_reason(result: dict, condition: dict, guard: dict) -> str | None:
             or audit.get("resolved_model") != condition["model"]
             or not _effort_matches(audit, condition)):
         return "invalid_provider_audit"
+    if audit.get("provider_refusal") is True:
+        if result.get("artifact_present"):
+            return "refusal_artifact_conflict"
+        if guard.get("stop"):
+            return guard.get("reason", "subscription_guard")
+        # Native Claude refusals can exit 1 despite a complete, audited terminal
+        # refusal. This is a nonpass outcome, never a successful answer.
+        if (type(result.get("exit_code")) is not int or result["exit_code"] not in {0, 1}
+                or result.get("timed_out")):
+            return "invalid_provider_refusal"
+        return None
     if result.get("artifact_present") or result.get("timed_out"):
         return None
     if result.get("exit_code") != 0:
@@ -331,6 +395,10 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
     if state.get("plan_sha256") != manifest["plan_sha256"]:
         raise ValueError("orchestration state does not match the frozen plan")
     conditions = {c["id"]: c for c in manifest["conditions"]}
+    requests = _stop_requests(out, manifest)
+    acknowledged = state.setdefault("control_acknowledgements", {})
+    for provider in state["providers"]:
+        acknowledged.setdefault(provider, [])
     for row in manifest["schedule"]:
         path = _record_path(out, row)
         if path.exists():
@@ -340,12 +408,30 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
             raise ValueError("unknown provider requested for explicit resume")
         previous = state["providers"][provider]
         state["providers"][provider] = {"status": "ready", "explicitly_resumed_from": previous}
+        acknowledged[provider] = sorted(set(acknowledged[provider]) |
+                                        {r["request_id"] for r in requests if provider in r["providers"]})
     runtime.write_json(out / "orchestration.json", state)
     lock = threading.Lock()
 
     def stopped(provider):
         with lock:
             return state["providers"][provider]["status"] != "ready"
+
+    def check_controls(provider):
+        requests = _stop_requests(out, manifest)
+        with lock:
+            pending = [r["request_id"] for r in requests if provider in r["providers"]
+                       and r["request_id"] not in acknowledged[provider]]
+            if pending:
+                acknowledged[provider].extend(pending)
+                previous = state["providers"][provider]
+                if previous["status"] == "ready":
+                    state["providers"][provider] = {"status": "paused", "reason": "user_requested_pause",
+                        "stop_requests": pending, "paused_at": datetime.now(timezone.utc).isoformat()}
+                else:
+                    previous["stop_requests"] = sorted(set(previous.get("stop_requests", [])) | set(pending))
+                runtime.write_json(out / "orchestration.json", state)
+            return state["providers"][provider]["status"] == "ready"
 
     def stop(provider, reason, row):
         with lock:
@@ -377,6 +463,11 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
                       subscription_prechecks=previous.get("subscription_prechecks", []))
         for number in (1, 2):
             _verify_plan(out)
+            if not check_controls(row["provider"]):
+                if record["attempts"]:
+                    record.update(status="blocked", stop_reason="user_pause_after_launch_failure")
+                    _save_record(path, record)
+                return False
             base = Path(row["label"]) / row["task"] / f"attempt-{number}"
             workspace = out / "private" / "workspaces" / base
             runtime_dir = out / "private" / "runtimes" / base
@@ -394,6 +485,12 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
                     record.update(status="deferred" if not record["attempts"] else "blocked", stop_reason=reason)
                     _save_record(path, record)
                     stop(row["provider"], reason, row)
+                    return False
+                if not check_controls(row["provider"]):
+                    with lock:
+                        reason = state["providers"][row["provider"]].get("reason", "provider_stopped")
+                    record.update(status="blocked" if record["attempts"] else "deferred", stop_reason=reason)
+                    _save_record(path, record)
                     return False
                 _stage(workspace, row["task"])
                 record["attempts"].append({"number": number, "status": "running",
@@ -429,6 +526,8 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
                     stop(row["provider"], reason, row)
                     return False
                 record.update(status="completed", eligible_for_grading=True)
+                if audit.get("provider_refusal") is True:
+                    record["outcome"] = "provider_refusal"
                 _save_record(path, record)
                 if guard.get("stop"):
                     stop(row["provider"], guard["reason"], row)
@@ -454,6 +553,7 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
                 for row in manifest["schedule"]:
                     if row["sample"] != sample or row["provider"] != provider:
                         continue
+                    check_controls(provider)
                     path = _record_path(out, row)
                     if path.exists():
                         record = _read(path)
@@ -469,6 +569,7 @@ def _run_experiment(out: Path, resume_providers: tuple[str, ...], grade_complete
                         for seed in manifest["seeds"]:
                             with lock:
                                 futures.append(grading.submit(grade, row, seed))
+                check_controls(provider)
 
             with cf.ThreadPoolExecutor(max_workers=len(state["providers"])) as authors:
                 jobs = [authors.submit(worker, provider) for provider in state["providers"]]
@@ -493,21 +594,31 @@ def status(out: Path) -> dict:
         run = out / row["label"] / f"{row['task']}_s{row['seed']}"
         grade_counts["graded" if (run / "grade.json").exists() else
                      "failure" if (run / "failure.json").exists() else "missing"] += 1
+    state = _read(out / "orchestration.json")
+    requests = _stop_requests(out, manifest)
+    acknowledged = state.get("control_acknowledgements", {})
+    pending = {provider: [request["request_id"] for request in requests
+                          if provider in request["providers"]
+                          and request["request_id"] not in acknowledged.get(provider, [])]
+               for provider in state["providers"]}
     return {"authoring": dict(counts), "grading": dict(grade_counts),
             "planned_authors": len(manifest["schedule"]),
             "planned_runs": len(manifest["expected_runs"]),
-            "providers": _read(out / "orchestration.json")["providers"]}
+            "providers": state["providers"],
+            "stop_requests": {"total": len(requests), "pending_by_provider": pending}}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "author", "run", "status"),
+    parser.add_argument("command", choices=("plan", "author", "run", "status", "request-stop"),
                         help="author freezes programs without grading; run also grades frozen programs")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--cases", type=Path, default=Path(__file__).with_name("cases.json"))
     parser.add_argument("--preflight-root", type=Path)
     parser.add_argument("--timeout", type=float, default=matrix.AUTHOR_TIMEOUT_S)
     parser.add_argument("--resume-provider", action="append", default=[])
+    parser.add_argument("--provider", action="append", default=[],
+                        help="request-stop target; repeat for multiple providers, default all")
     args = parser.parse_args()
     if args.command == "plan":
         if args.preflight_root is None:
@@ -516,6 +627,8 @@ def main():
         result = status(args.out)
     elif args.command in {"author", "run"}:
         result = run_experiment(args.out, tuple(args.resume_provider), grade_completed=args.command == "run")
+    elif args.command == "request-stop":
+        result = request_stop(args.out, tuple(args.provider))
     else:
         result = status(args.out)
     print(json.dumps(result, indent=2))

@@ -97,6 +97,14 @@ evaluation directories outside the benchmark repository. A source or policy
 change after planning requires a new experiment identity, not a modified plan
 with earlier scores carried forward.
 
+A narrowly scoped audit-only amendment may preserve already collected,
+ungraded first attempts in a new plan when a migration receipt proves that
+prompts, task inputs, models, native launch configuration, budgets, schedule,
+and grading code are unchanged. The original plan, records, and artifacts
+remain immutable. Reclassification is reported explicitly; it must not cause
+new generations or select a better artifact. See the
+[native-refusal amendment](amendments/2026-09-04-native-refusal.md).
+
 The schedule is balanced across conditions within task/sample blocks, using
 the predeclared randomization seed. Begin with at most one active authoring
 call per provider. Keep grading concurrency fixed and conservative because
@@ -174,6 +182,14 @@ Incomplete snapshots must display coverage prominently and must not be
 presented as fully observed model-quality rankings. No failed or missing cell
 may disappear from a published denominator.
 
+A verified native provider policy refusal without a submission is a completed
+provider outcome and an operational nonpass, not a successful answer or an
+observed instrument-control failure. Preserve the first refusal and report its
+count separately. Do not resubmit, rephrase, weaken safeguards, or change the
+requested model in response to it. Other unattempted, predeclared cases may
+continue. A synthetic error message is not a substitute model identity; a
+refusal requires consistent native initialization and terminal evidence.
+
 ## Release gate and publication
 
 Before scored execution, the exact task-set revision must pass the full
@@ -242,3 +258,16 @@ evidence. Source, CLI, or plan changes stop execution. A stopped provider is
 not silently restarted: inspect its retained records and current subscription
 state before using the explicit `--resume-provider` option. Interrupted
 in-progress authoring records require manual integrity review.
+
+To switch phases or pause scheduling without terminating an active call:
+
+```bash
+python -m experiments.model_matrix.runner request-stop --out /path/to/scoring-root
+# Wait for active calls to finish and the evaluator to exit, then explicitly resume.
+caffeinate -i python -m experiments.model_matrix.runner run \
+  --out /path/to/scoring-root --resume-provider openai --resume-provider anthropic
+```
+
+Stop requests are data-only receipts bound to the frozen plan. They take effect
+at call boundaries. Resuming does not replay completed attempts, and every new
+call still requires the subscription guard to pass.

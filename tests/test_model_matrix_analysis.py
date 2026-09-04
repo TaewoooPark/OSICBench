@@ -9,6 +9,32 @@ from experiments.model_matrix.analyze import (
 )
 
 
+def _refusal_record(row):
+    return {**row, "status": "completed", "outcome": "provider_refusal", "eligible_for_grading": True,
+            "artifact_present": False, "artifact_sha256": None, "wall_s": 7.5,
+            "attempts": [{"timed_out": False}],
+            "provider_audit": {"valid": True, "provider_refusal": True, "completion_successful": False,
+                               "completion_status": "completed_provider_refusal",
+                               "identity_evidence": "init_and_refusal_metadata",
+                               "requested_model": "model-a", "resolved_model": "model-a",
+                               "primary_models": ["model-a"], "refusal_category": "cyber",
+                               "provider_error": "invalid_request", "provider_error_status": None,
+                               "usage": {"input_tokens": 11},
+                               "provider_refusal_details": {"category": "cyber", "provider_error": "invalid_request",
+                                                            "provider_error_status": None, "terminal_reason": "api_error",
+                                                            "system_subtype": "model_refusal_no_fallback", "original_model": "model-a"}}}
+
+
+def _save_refusal(root, row, *, failure=True, record=None):
+    author = root / "authoring" / row["label"] / f"{row['task']}.json"
+    author.parent.mkdir(parents=True, exist_ok=True)
+    author.write_text(json.dumps(record if record is not None else _refusal_record(row)))
+    if failure:
+        path = root / row["label"] / f"{row['task']}_s{row['seed']}" / "failure.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**row, "reason": "missing_author_artifact"}))
+
+
 def _fixture(tmp_path, conditions=("a", "b", "c"), samples=(1, 2, 3),
              tasks=("t01", "t02"), seeds=(1, 2), contrasts=None):
     root, task_root = tmp_path / "runs", tmp_path / "tasks"
@@ -131,6 +157,120 @@ def test_missing_grades_are_operational_failures_not_zero_subscores(tmp_path):
     assert a["metrics"]["rs"]["ungraded_runs"] == 12
     assert all(row["rs"] is None for row in result["runs"] if row["condition"] == "a")
     assert any("matrix is incomplete" in note for note in result["caveats"])
+
+
+def test_refusal_is_distinct_and_does_not_become_a_measured_zero(tmp_path):
+    root, tasks, rows = _fixture(tmp_path, samples=(1,))
+    for row in rows:
+        if row["condition"] == "a" and row["task"] == "t01":
+            _save_refusal(root, row)
+        else:
+            _grade(root, row, rs=80)
+    result = build_analysis(root, tasks)
+    condition = result["conditions"]["a"]
+    assert condition["task_pass"]["passed"] == 1 and condition["task_pass"]["total"] == 2
+    assert condition["coverage"]["provider_refusal_runs"] == 2
+    assert condition["coverage"]["provider_refusal_missing_artifact_failures"] == 2
+    assert condition["coverage"]["failure_reasons"] == {"missing_author_artifact": 2}
+    assert condition["authoring"]["provider_refusal_records"] == 1
+    assert condition["authoring"]["provider_refusal_categories"] == {"cyber": 1}
+    assert condition["authoring"]["wall_s_total"] == 7.5
+    assert condition["authoring"]["token_usage"]["input_tokens"]["total"] == 11
+    assert condition["authoring"]["provider_model_observations"]["observed_primary_models"] == ["model-a"]
+    assert condition["metrics"]["dfs"]["mean"] == 100
+    refused = [row for row in result["runs"] if row["provider_refusal"]]
+    assert len(refused) == 2 and all(not row["passed"] for row in refused)
+    assert all(row[key] is None for row in refused for key in ("dfs", "hss", "rs", "transactions"))
+    markdown = render_markdown(result)
+    assert "Provider refusals" in markdown and "not graded evidence of instrument-control competence" in markdown
+
+
+def test_refusal_without_failure_accounting_remains_unresolved(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_refusal(root, rows[0], failure=False)
+    result = build_analysis(root, tasks)
+    assert result["coverage"]["provider_refusal_runs"] == 2
+    assert result["coverage"]["provider_refusal_missing_artifact_failures"] == 0
+    assert result["conditions"]["a"]["authoring"]["provider_refusal_records"] == 1
+    assert result["conditions"]["a"]["metrics"]["dfs"]["mean"] is None
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.update(artifact_present=True),
+    lambda r: r.update(artifact_sha256="a" * 64),
+    lambda r: r.update(status="blocked"),
+    lambda r: r.update(eligible_for_grading=False),
+    lambda r: r["provider_audit"].update(provider_refusal=False),
+    lambda r: r["provider_audit"].update(valid=False),
+    lambda r: r["provider_audit"].update(completion_successful=True),
+    lambda r: r["provider_audit"].update(identity_evidence="trace_primary_models"),
+    lambda r: r["provider_audit"].update(resolved_model="another-model"),
+    lambda r: r["provider_audit"]["provider_refusal_details"].update(category="other"),
+])
+def test_inconsistent_refusal_accounting_is_rejected(tmp_path, mutation):
+    root, tasks, rows = _fixture(tmp_path)
+    record = _refusal_record(rows[0])
+    mutation(record)
+    _save_refusal(root, rows[0], record=record)
+    with pytest.raises(ValueError):
+        build_analysis(root, tasks)
+
+
+def test_refusal_cannot_also_have_an_instrument_grade(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_refusal(root, rows[0], failure=False)
+    _grade(root, rows[0])
+    with pytest.raises(ValueError, match="cannot have instrument grades"):
+        build_analysis(root, tasks)
+
+
+def test_refusal_metadata_is_allowlisted_and_old_records_need_no_outcome(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    record = _refusal_record(rows[0])
+    del record["outcome"]
+    record["provider_audit"]["raw_error"] = "private-error-content"
+    record["provider_audit"]["provider_refusal_details"]["explanation"] = "/Users/private/explanation"
+    _save_refusal(root, rows[0], record=record)
+    result = build_analysis(root, tasks)
+    encoded = json.dumps(result)
+    assert "private-error-content" not in encoded and "/Users/" not in encoded
+    assert result["conditions"]["a"]["authoring"]["provider_refusal_records"] == 1
+
+
+def test_imported_record_hashes_are_public_but_private_source_fields_are_not(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    record = _refusal_record(rows[0])
+    record["migration"] = {"schema_version": 1, "source_plan_sha256": "a" * 64,
+                           "source_record_sha256": "b" * 64, "source_record_file_sha256": "c" * 64,
+                           "original_status": "blocked", "outcome_reclassified": True,
+                           "call_ids": ["a/t01/attempt-1"], "private_source": "/Users/private/record"}
+    _save_refusal(root, rows[0], record=record)
+    result = build_analysis(root, tasks)
+    imported = result["conditions"]["a"]["authoring"]["imported_records"][0]
+    assert imported["source_record_sha256"] == "b" * 64
+    assert imported["source_record_file_sha256"] == "c" * 64
+    assert "private_source" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_http_errors_cannot_be_reported_as_the_supported_native_refusal(tmp_path, status):
+    root, tasks, rows = _fixture(tmp_path)
+    record = _refusal_record(rows[0])
+    record["provider_audit"]["provider_error_status"] = status
+    record["provider_audit"]["provider_refusal_details"]["provider_error_status"] = status
+    _save_refusal(root, rows[0], record=record)
+    with pytest.raises(ValueError, match="nonnull HTTP error"):
+        build_analysis(root, tasks)
+
+
+def test_refusal_failure_reason_cannot_be_silently_reclassified(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_refusal(root, rows[0])
+    row = rows[0]
+    path = root / row["label"] / f"{row['task']}_s{row['seed']}" / "failure.json"
+    path.write_text(json.dumps({"reason": "grading_error"}))
+    with pytest.raises(ValueError, match="must preserve missing_author_artifact"):
+        build_analysis(root, tasks)
 
 
 def test_rs_coverage_and_hss_applicable_subset_are_explicit(tmp_path):

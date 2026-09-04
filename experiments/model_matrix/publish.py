@@ -165,6 +165,7 @@ def _audit(record: dict) -> dict:
     if not isinstance(source, dict):
         return {}
     result = {key: source[key] for key in ("valid", "rate_limited") if type(source.get(key)) is bool}
+    result.update(analyze.public_completion(source))
     for key in AUDIT_IDENTITIES:
         if source.get(key) is not None:
             result[key] = _identity(source[key])
@@ -179,6 +180,46 @@ def _audit(record: dict) -> dict:
     if isinstance(usage, dict):
         result["usage"] = {key: value for key, value in usage.items() if key in analyze.TOKEN_FIELDS
                            and type(value) is int and value >= 0}
+    return result
+
+
+def _author_public_fields(record: dict, raw: bytes) -> dict:
+    """Publish outcome and imported-record hash links, never private records."""
+    outcome = analyze.author_outcome(record)
+    result = {"private_record_file_sha256": hashlib.sha256(raw).hexdigest()}
+    if record.get("status") == "completed" and not isinstance(record.get("record_sha256"), str):
+        _reject("completed_author_missing_sealed_digest")
+    if record.get("record_sha256") is not None:
+        unsigned = {key: value for key, value in record.items() if key != "record_sha256"}
+        actual = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":"),
+                                           allow_nan=False).encode()).hexdigest()
+        if record["record_sha256"] != actual:
+            _reject("author_record_hash_mismatch")
+    if outcome is not None:
+        result["outcome"] = outcome
+    if record.get("status") in {"completed", "blocked", "running", "retry_pending", "deferred"}:
+        result["status"] = record["status"]
+    for field in ("eligible_for_grading", "artifact_present"):
+        if field in record:
+            if type(record[field]) is not bool:
+                _reject("invalid_author_outcome_flag")
+            result[field] = record[field]
+    for field in ("artifact_sha256", "record_sha256"):
+        if field in record:
+            digest = record[field]
+            if digest is not None and (not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+                _reject("invalid_author_provenance_digest")
+            result["private_record_sha256" if field == "record_sha256" else field] = digest
+    if "migration" in record:
+        if not isinstance(record.get("record_sha256"), str):
+            _reject("imported_record_missing_sealed_digest")
+        result["migration"] = analyze.public_migration(record["migration"])
+        if result["migration"]["original_status"] == "deferred" and (
+                record.get("status") != "deferred" or record.get("attempts") != []):
+            _reject("deferred_migration_has_execution_evidence")
+        prefix = f"{record.get('label')}/{record.get('task')}/"
+        if any(not call.startswith(prefix) for call in result["migration"]["call_ids"]):
+            _reject("imported_record_call_identity_mismatch")
     return result
 
 
@@ -202,6 +243,16 @@ def _public_manifest(source: dict, expected: list[dict]) -> dict:
               "conditions": conditions, "samples": len({row["sample"] for row in plan}),
               "seeds": sorted({row["seed"] for row in plan}),
               "contrasts": analyze._contrasts(source, {row["condition"] for row in plan})}
+    if "migration" in source:
+        migration = source["migration"]
+        if not isinstance(migration, dict) or migration.get("schema_version") != 1:
+            _reject("invalid_manifest_migration")
+        result["migration"] = {"schema_version": 1, "amendment_id": _identity(migration.get("amendment_id"))}
+        for field in ("source_plan_sha256", "source_manifest_file_sha256"):
+            digest = migration.get(field)
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                _reject("invalid_manifest_migration_digest")
+            result["migration"][field] = digest
     for key in HASH_FIELDS:
         value = source.get(key)
         if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
@@ -288,7 +339,10 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
                 if not isinstance(failure.get("reason"), str):
                     _reject("invalid_failure_accounting", base)
                 reason = failure["reason"] if failure["reason"] in analyze.FAILURE_REASONS else "other_recorded_failure"
-                add(base + "/failure.json", _encoded({**row, "reason": reason}), original=raw)
+                public_failure = {**row, "reason": reason}
+                if failure.get("stage") in ("authoring", "grading"):
+                    public_failure["stage"] = failure["stage"]
+                add(base + "/failure.json", _encoded(public_failure), original=raw)
                 failed += 1
             else:
                 missing += 1
@@ -359,6 +413,7 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
             author_cache[key] = selected
             sanitized = {field: row[field] for field in ("label", "condition", "sample", "task")}
             sanitized.update(artifact_sha256=fingerprint, provider_audit=_audit(author))
+            sanitized.update(_author_public_fields(author, author_bytes))
             if type(author.get("wall_s")) in (int, float):
                 sanitized["wall_s"] = author["wall_s"]
             attempts = author.get("attempts", [])
@@ -390,8 +445,7 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
             _reject("author_identity_mismatch", relative)
         sanitized = {field: row[field] for field in ("label", "condition", "sample", "task")}
         sanitized["provider_audit"] = _audit(record)
-        if record.get("status") in ("completed", "blocked", "running", "retry_pending"):
-            sanitized["status"] = record["status"]
+        sanitized.update(_author_public_fields(record, raw))
         if type(record.get("wall_s")) in (int, float):
             sanitized["wall_s"] = record["wall_s"]
         attempts = record.get("attempts", [])
@@ -413,6 +467,10 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
                           "raw_bytes": "Grades, recorder events, results and included submission files are unchanged.",
                           "submission": "Frozen authoring files only; raw logs, endpoints, credentials and customization/cache directories are excluded. Unknown binaries require review. Programs are never executed or syntax-filtered.",
                           "accounting": "Complete means each planned run has a grade or recorded failure; it does not imply complete quality observation or a model-quality ranking."}}
+    receipt = root / "migration_receipt.json"
+    _no_symlinks(receipt)
+    if receipt.exists():
+        summary["private_migration_receipt_sha256"] = hashlib.sha256(_read(receipt, "migration_receipt.json")).hexdigest()
     add("bundle.json", _encoded(summary))
     try:
         analyze.write_analysis(stage, tasks, stage / "analysis")

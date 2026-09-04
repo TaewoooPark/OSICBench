@@ -214,3 +214,178 @@ def test_fallback_event_type_is_rejected(tmp_path):
     events = _events()
     events.insert(2, {"type": "model_fallback"})
     assert "model_fallback_observed" in _inspect(tmp_path, events)["errors"]
+
+
+def _refusal_events():
+    """Neutral metadata-only fixture matching the native server-refusal shape."""
+    events = _events()
+    events[1] = {"type": "system", "subtype": "model_refusal_no_fallback",
+                 "original_model": MODEL, "api_refusal_category": "cyber",
+                 "api_refusal_explanation": "Neutral policy-refusal explanation."}
+    events.insert(2, {
+        "type": "assistant", "error": "invalid_request", "is_api_error_message": True,
+        "message": {"model": "<synthetic>", "stop_reason": "refusal",
+                    "stop_details": {"type": "refusal", "category": "cyber",
+                                     "explanation": "Neutral policy-refusal explanation."},
+                    "content": [{"type": "text", "text": "Provider policy refusal."}]}})
+    events[-1].update(is_error=True, stop_reason="refusal", terminal_reason="api_error",
+                       api_error_status=None)
+    return events
+
+
+def test_native_policy_refusal_is_valid_identity_but_not_a_successful_answer(tmp_path):
+    result = _inspect(tmp_path, _refusal_events())
+    assert result["valid"] is True and result["errors"] == []
+    assert result["provider_refusal"] is True
+    assert result["completion_successful"] is False
+    assert result["completion_status"] == "completed_provider_refusal"
+    assert result["identity_evidence"] == "init_and_refusal_metadata"
+    assert result["resolved_model"] == MODEL and result["primary_models"] == [MODEL]
+    assert "<synthetic>" not in result["primary_models"]
+    assert result["auxiliary_models"] == ["claude-haiku-4-5-20251001"]
+    assert result["refusal_category"] == "cyber"
+    assert result["provider_error"] == "invalid_request"
+    assert result["provider_refusal_details"] == {
+        "category": "cyber", "provider_error": "invalid_request", "provider_error_status": None,
+        "terminal_reason": "api_error", "system_subtype": "model_refusal_no_fallback",
+        "original_model": MODEL}
+    assert result["effort_verification"] == "launch_configuration_only"
+    assert result["incomplete_trace_accepted"] is False
+    assert "Neutral policy-refusal" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500, 503, 0, False, "429"])
+def test_native_refusal_does_not_downgrade_explicit_http_errors(tmp_path, status):
+    events = _refusal_events()
+    events[-1]["api_error_status"] = status
+    result = _inspect(tmp_path, events)
+    assert result["valid"] is False
+    assert result["provider_refusal"] is False
+    assert "native_provider_refusal_unverified" in result["errors"]
+
+
+def test_native_refusal_allows_missing_http_status_like_observed_null(tmp_path):
+    events = _refusal_events()
+    del events[-1]["api_error_status"]
+    result = _inspect(tmp_path, events)
+    assert result["valid"] is True and result["provider_refusal"] is True
+
+
+@pytest.mark.parametrize("violation", [
+    "no_native_event", "wrong_native_event", "wrong_init", "wrong_original_model",
+    "no_requested_usage", "bad_usage", "no_details", "wrong_category", "no_api_marker",
+    "wrong_provider_error", "wrong_assistant_stop", "wrong_terminal_stop", "wrong_terminal_reason",
+    "not_error", "wrong_terminal_subtype", "no_assistant", "second_synthetic",
+    "synthetic_result", "reordered_envelope", "duplicate_native_event", "unknown_synthetic_model",
+])
+def test_refusal_exception_requires_all_native_evidence(tmp_path, violation):
+    events = _refusal_events()
+    if violation == "no_native_event":
+        del events[1]
+    elif violation == "wrong_native_event":
+        events[1]["subtype"] = "unrecognized_refusal"
+    elif violation == "wrong_init":
+        events[0]["model"] = "claude-sonnet-5"
+    elif violation == "wrong_original_model":
+        events[1]["original_model"] = "claude-sonnet-5"
+    elif violation == "no_requested_usage":
+        del events[-1]["modelUsage"][MODEL]
+    elif violation == "bad_usage":
+        events[-1]["modelUsage"][MODEL] = None
+    elif violation == "no_details":
+        del events[2]["message"]["stop_details"]
+    elif violation == "wrong_category":
+        events[2]["message"]["stop_details"]["category"] = "different_category"
+    elif violation == "no_api_marker":
+        del events[2]["is_api_error_message"]
+    elif violation == "wrong_provider_error":
+        events[2]["error"] = "unrecognized_error"
+    elif violation == "wrong_assistant_stop":
+        events[2]["message"]["stop_reason"] = "end_turn"
+    elif violation == "wrong_terminal_stop":
+        events[-1]["stop_reason"] = "end_turn"
+    elif violation == "wrong_terminal_reason":
+        events[-1]["terminal_reason"] = "unrecognized_error"
+    elif violation == "not_error":
+        events[-1]["is_error"] = False
+    elif violation == "wrong_terminal_subtype":
+        events[-1]["subtype"] = "error_during_execution"
+    elif violation == "no_assistant":
+        del events[2]
+    elif violation == "second_synthetic":
+        events.insert(3, dict(events[2]))
+    elif violation == "synthetic_result":
+        events[-1]["model"] = "<synthetic>"
+    elif violation == "reordered_envelope":
+        events[1], events[2] = events[2], events[1]
+    elif violation == "duplicate_native_event":
+        events.insert(2, dict(events[1]))
+    elif violation == "unknown_synthetic_model":
+        events[2]["message"]["model"] = "<other-synthetic>"
+    result = _inspect(tmp_path, events, allow_incomplete=True)
+    assert result["valid"] is False and result["provider_refusal"] is False
+    assert result["incomplete_trace_accepted"] is False
+
+
+@pytest.mark.parametrize("violation,expected_error", [
+    ("auth", "subscription_auth_not_confirmed"),
+    ("skills", "unexpected_or_missing_skills"),
+    ("tools", "unexpected_or_missing_tools"),
+    ("tool_use", "unexpected_tool_use"),
+    ("effort", "effort_mismatch"),
+    ("overage", "paid_overage_observed"),
+    ("quota", "rate_limit_not_allowed"),
+    ("fallback_event", "model_fallback_observed"),
+    ("fallback_field", "model_fallback_observed"),
+    ("other_real_model", "primary_model_mismatch"),
+    ("provider_error", "provider_error_event"),
+])
+def test_native_refusal_does_not_relax_other_audit_checks(tmp_path, violation, expected_error):
+    events = _refusal_events()
+    if violation == "auth":
+        events[0]["apiKeySource"] = "environment"
+    elif violation == "skills":
+        events[0]["skills"] = ["ambient-customization"]
+    elif violation == "tools":
+        events[0]["tools"].append("WebFetch")
+    elif violation == "tool_use":
+        events[2]["message"]["content"].append({"type": "tool_use", "name": "WebFetch"})
+    elif violation == "effort":
+        events[0]["effort"] = "low"
+    elif violation == "overage":
+        events[3]["rate_limit_info"]["isUsingOverage"] = True
+    elif violation == "quota":
+        events[3]["rate_limit_info"]["status"] = "rejected"
+    elif violation == "fallback_event":
+        events.insert(1, {"type": "model_fallback"})
+    elif violation == "fallback_field":
+        events[1]["fallback_model"] = "claude-sonnet-5"
+    elif violation == "other_real_model":
+        events.insert(1, {"type": "assistant", "message": {"model": "claude-sonnet-5"}})
+    elif violation == "provider_error":
+        events.insert(3, {"type": "error"})
+    result = _inspect(tmp_path, events)
+    assert result["valid"] is False and result["provider_refusal"] is False
+    assert expected_error in result["errors"]
+
+
+def test_native_refusal_does_not_suppress_stderr_fallback(tmp_path):
+    result = _inspect(tmp_path, _refusal_events(), "falling back to another model")
+    assert result["valid"] is False and result["provider_refusal"] is False
+    assert "stderr_fallback_or_effort_warning" in result["errors"]
+
+
+def test_no_fallback_event_name_is_not_itself_fallback_evidence(tmp_path):
+    events = _refusal_events()
+    del events[2]["message"]["stop_details"]
+    errors = _inspect(tmp_path, events)["errors"]
+    assert "native_provider_refusal_unverified" in errors
+    assert "model_fallback_observed" not in errors
+
+
+def test_clean_success_has_no_refusal_classification(tmp_path):
+    result = _inspect(tmp_path, _events())
+    assert result["valid"] and result["completion_successful"]
+    assert result["completion_status"] == "completed_successfully"
+    assert result["provider_refusal"] is False
+    assert result["provider_refusal_details"] is None
