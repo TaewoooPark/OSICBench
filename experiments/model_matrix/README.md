@@ -117,6 +117,13 @@ Interrupted attempts remain explicit until adjudicated under the declared
 retry policy. Resume unattempted work only after the account permits it.
 Record queue pauses separately from active authoring time.
 
+Keep the host awake and its lid open. On macOS, launch long phases through
+`caffeinate -i`; this prevents idle sleep, not lid-closed sleep. Authoring
+records compare epoch and monotonic elapsed time and reject discontinuities
+greater than two seconds. A suspension can also corrupt simulated timing:
+invalidate every affected validation run, including passing runs, retain its
+original evidence, and repeat the complete affected task block while awake.
+
 ## Scoring and statistical comparisons
 
 For each condition and authoring sample, a task passes only if **every planned
@@ -223,10 +230,10 @@ python -m experiments.model_matrix.runner plan \
   --preflight-root /path/to/private-preflight-root
 
 # Optional: collect frozen programs without running them against the bench.
-python -m experiments.model_matrix.runner author --out /path/to/new-scoring-root
+caffeinate -i python -m experiments.model_matrix.runner author --out /path/to/new-scoring-root
 
 # After the release gate passes, grade existing programs and finish the matrix.
-python -m experiments.model_matrix.runner run --out /path/to/new-scoring-root
+caffeinate -i python -m experiments.model_matrix.runner run --out /path/to/new-scoring-root
 python -m experiments.model_matrix.runner status --out /path/to/new-scoring-root
 ```
 

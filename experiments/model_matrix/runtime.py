@@ -42,6 +42,11 @@ def source_hash() -> str:
     return digest.hexdigest()
 
 
+def clock_discontinuity(wall_elapsed: float, active_elapsed: float) -> bool:
+    """Reject suspend or clock jumps that invalidate an authoring duration."""
+    return abs(wall_elapsed - active_elapsed) > 2.0
+
+
 def build_profile(workspace: Path, runtime_dir: Path, evaluation_root: Path, proxy_port: int) -> str:
     """Deny unrelated task/configuration trees and allow only this call's files.
 
@@ -81,6 +86,7 @@ def process_call(command: list[str], *, workspace: Path, env: dict,
     prompt_path.write_text(prompt)
     record = {"status": "running", "exit_code": None, "timed_out": False,
               "command": command, "cwd": str(workspace)}
+    record["started_epoch_s"] = time.time()
     write_json(log_dir / "process.json", record)
     started = time.monotonic()
     proc = None
@@ -102,7 +108,12 @@ def process_call(command: list[str], *, workspace: Path, env: dict,
                     matrix_runner._terminate_tree(proc)
                 except (OSError, subprocess.SubprocessError) as exc:
                     record["cleanup_error"] = type(exc).__name__
-    record.update(status="completed", wall_s=round(time.monotonic() - started, 3))
+    active_elapsed = time.monotonic() - started
+    record.update(status="completed", wall_s=round(active_elapsed, 3),
+                  finished_epoch_s=time.time())
+    wall_elapsed = record["finished_epoch_s"] - record["started_epoch_s"]
+    record["epoch_elapsed_s"] = round(wall_elapsed, 3)
+    record["clock_discontinuity"] = clock_discontinuity(wall_elapsed, active_elapsed)
     write_json(log_dir / "process.json", record)
     return record
 
@@ -143,6 +154,9 @@ def execute(condition: dict, *, workspace: Path, runtime_dir: Path,
         audit.setdefault("resolved_effort", audit["resolved"].get("effort"))
     if audit.get("init_cwd") and Path(audit["init_cwd"]).resolve() != workspace.resolve():
         audit["errors"].append("workspace_mismatch")
+        audit["valid"] = False
+    if result["clock_discontinuity"]:
+        audit["errors"].append("host_suspend_or_clock_discontinuity")
         audit["valid"] = False
     result["provider_audit"] = audit
     result["artifact_present"] = (workspace / "main.py").is_file()

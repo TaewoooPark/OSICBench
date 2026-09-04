@@ -7,8 +7,14 @@ import subprocess
 
 import pytest
 
-from experiments.model_matrix.runtime import build_profile
+from experiments.model_matrix.runtime import build_profile, clock_discontinuity
 from experiments.model_matrix.transport import TransportProxy
+
+
+def test_sleep_or_clock_jump_invalidates_timing_not_network_wait():
+    assert clock_discontinuity(301, 109)
+    assert clock_discontinuity(100, 109)
+    assert not clock_discontinuity(180.1, 180)
 
 
 def test_gateway_rejects_nonprovider_destination():
