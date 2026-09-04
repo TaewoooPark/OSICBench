@@ -1,0 +1,245 @@
+{
+  "seeds": [
+    1,
+    7,
+    42
+  ],
+  "programs": 9,
+  "runs": 27,
+  "behaved": 27,
+  "validation_passed": true,
+  "reference_stability": {
+    "evaluated": true,
+    "seed_count": 3,
+    "cv_limit": 0.05,
+    "per_task": {
+      "t14_coil_park": {
+        "runs": 6,
+        "mean": 100,
+        "cv": 0,
+        "pass": true
+      }
+    }
+  },
+  "escapes": [],
+  "results": [
+    {
+      "task": "t14_coil_park",
+      "program": "m1_slam_park",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m1_slam_park",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m1_slam_park",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m2_slam_ramp",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m2_slam_ramp",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m2_slam_ramp",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m3_no_reconnect",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m3_no_reconnect",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m3_no_reconnect",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m4_no_settle",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m4_no_settle",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m4_no_settle",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m5_leaves_energized",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m5_leaves_energized",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m5_leaves_energized",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m6_off_without_zero",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m6_off_without_zero",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m6_off_without_zero",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m7_default_nplc",
+      "seed": 1,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m7_default_nplc",
+      "seed": 7,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "m7_default_nplc",
+      "seed": 42,
+      "pass": false,
+      "ok": true,
+      "dfs": 0
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_oo",
+      "seed": 1,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_oo",
+      "seed": 7,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_oo",
+      "seed": 42,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_procedural",
+      "seed": 1,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_procedural",
+      "seed": 7,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    },
+    {
+      "task": "t14_coil_park",
+      "program": "ref_procedural",
+      "seed": 42,
+      "pass": true,
+      "ok": true,
+      "dfs": 100
+    }
+  ],
+  "scope": "Targeted T14 regression, not the full release gate",
+  "reproduction_command": "python -m osicbench.cli validate --tasks tasks --task t14_coil_park --seed-list 1,7,42 --jobs 3 --out <fresh-run-root> --json-out <gate-path>"
+}

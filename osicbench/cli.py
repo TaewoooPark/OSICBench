@@ -50,16 +50,36 @@ def _one_validation(task_dir: str, sub: str, seed: int, expect_pass: bool, out_r
 
 
 def _cmd_validate(args) -> int:
+    if args.jobs < 1:
+        print("--jobs must be positive", file=sys.stderr)
+        return 2
+    if args.refs_only and args.mutants_only:
+        print("--refs-only and --mutants-only cannot be combined", file=sys.stderr)
+        return 2
+    if args.seed_list is not None:
+        try:
+            seeds = [int(s.strip()) for s in args.seed_list.split(",")]
+        except ValueError:
+            print("--seed-list must contain a nonempty list of integers", file=sys.stderr)
+            return 2
+    elif args.seeds > 0:
+        seeds = list(range(1, args.seeds + 1))
+    else:
+        print("--seeds must be positive", file=sys.stderr)
+        return 2
+    if len(seeds) != len(set(seeds)):
+        print("validation seeds must be unique", file=sys.stderr)
+        return 2
+
     tasks = discover_tasks(Path(args.tasks))
     if args.task:
         tasks = [t for t in tasks if t.id == args.task]
         if not tasks:
             print(f"no such task: {args.task}", file=sys.stderr)
             return 2
-    if args.seed_list:
-        seeds = [int(s) for s in args.seed_list.split(",") if s.strip()]
-    else:
-        seeds = list(range(1, args.seeds + 1))
+    if not tasks:
+        print("no tasks found for validation", file=sys.stderr)
+        return 2
     jobs: List[Tuple[str, str, int, bool]] = []
     for task in tasks:
         refs = task.references() if not args.mutants_only else []
@@ -71,6 +91,9 @@ def _cmd_validate(args) -> int:
                 jobs.append((str(task.task_dir), str(ref), seed, True))
             for mut in muts:
                 jobs.append((str(task.task_dir), str(mut), seed, False))
+    if not jobs:
+        print("no validation programs selected", file=sys.stderr)
+        return 2
 
     failures: List[str] = []
     results = []
@@ -106,12 +129,49 @@ def _cmd_validate(args) -> int:
     elif len(seeds) >= 2:
         print(f"escape summary: none across {len(seeds)} seeds")
 
+    # Preserve the task-level stability metric, using the actual seed
+    # list rather than the default --seeds count when it is overridden.
+    by_task: dict = {}
+    ref_keys = {(task.id, Path(r).stem)
+                for task in tasks for r in task.references()}
+    for task_id, name, seed, passed, ok, dfs in results:
+        if (task_id, name) in ref_keys:
+            by_task.setdefault(task_id, []).append(dfs)
+    stability: dict = {
+        "evaluated": bool(by_task) and len(seeds) >= 2,
+        "seed_count": len(seeds),
+        "cv_limit": 0.05,
+        "per_task": {},
+    }
+    if stability["evaluated"]:
+        print("\nreference DFS stability across seeds (mean / CV):")
+        for task_id in sorted(by_task):
+            xs = by_task[task_id]
+            mean = sum(xs) / len(xs)
+            var = sum((x - mean) ** 2 for x in xs) / len(xs)
+            cv = (var ** 0.5) / mean if mean > 0 else None
+            stable = cv is not None and cv <= stability["cv_limit"]
+            stability["per_task"][task_id] = {
+                "runs": len(xs), "mean": mean, "cv": cv, "pass": stable,
+            }
+            cv_text = f"{cv:6.2%}" if cv is not None else "undefined"
+            flag = "" if stable else "  <-- fails 5% CV gate"
+            print(f"  {task_id:26s} {mean:7.2f} / {cv_text}{flag}")
+            if not stable:
+                failures.append(f"{task_id}: reference DFS CV fails 5% gate")
+    else:
+        stability["not_evaluated_reason"] = (
+            "fewer_than_two_seeds" if len(seeds) < 2 else "no_reference_runs"
+        )
+
     if args.json_out:
         payload = {
             "seeds": seeds,
             "programs": len(attempts),
             "runs": len(results),
             "behaved": n_ref,
+            "validation_passed": not failures,
+            "reference_stability": stability,
             "escapes": [
                 {"task": t, "program": n, "seeds": sorted(bad),
                  "attempts": attempts[(t, n)]}
@@ -128,21 +188,6 @@ def _cmd_validate(args) -> int:
         out_path.write_text(json.dumps(payload, indent=2))
         print(f"gate record written: {out_path}")
 
-    # Seed-stability table: per-task DFS mean and CV across reference runs.
-    by_task: dict = {}
-    ref_names = {Path(r).stem for task in tasks for r in task.references()}
-    for task_id, name, seed, passed, ok, dfs in results:
-        if name in ref_names:
-            by_task.setdefault(task_id, []).append(dfs)
-    if by_task and args.seeds >= 2:
-        print("\nreference DFS stability across seeds (mean / CV):")
-        for task_id in sorted(by_task):
-            xs = by_task[task_id]
-            mean = sum(xs) / len(xs)
-            var = sum((x - mean) ** 2 for x in xs) / len(xs)
-            cv = (var ** 0.5) / mean if mean else float("inf")
-            flag = "" if cv <= 0.05 else "  <-- CV above 5% gate"
-            print(f"  {task_id:26s} {mean:7.2f} / {cv:6.2%}{flag}")
     if failures:
         print("FAILURES:")
         for f in failures:

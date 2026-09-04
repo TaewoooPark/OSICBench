@@ -21,17 +21,25 @@ pip install -e .
 # run one reference solution against one task, then grade it
 osicbench run --task tasks/t03_diode_iv \
     --submission tasks/t03_diode_iv/reference/ref_procedural.py \
-    --seed 7 --out runs/demo --label demo
+    --seed 7 --out runs/demo/t03_diode_iv_s7 --label demo
 
 # the whole self-validation gate: references must pass, mutants must fail
 osicbench validate --tasks tasks --seeds 2 --jobs 6 --out runs/validate
 
 # aggregate labeled runs into a report (pass rates, CIs, paired stats)
-osicbench report --runs runs/ --out reports/
+osicbench report --runs runs/demo/ --out reports/
 
 # replay any run's flight recorder as a human-readable timeline
-osicsim-replay runs/demo/farm/recorder.jsonl
+osicsim-replay runs/demo/t03_diode_iv_s7/farm/recorder.jsonl
 ```
+
+For model or skill comparisons, freeze the expected task/seed/sample
+matrix before authoring with
+[`adapters/matrix_runner.py plan`](adapters/README.md). This keeps missing
+submissions in the denominator and groups repeated samples correctly.
+The single-run example above remains supported but reports unverified
+coverage without a manifest. Keep validation sweeps and unrelated
+experiments outside the run directory being compared.
 
 Requirements: Python 3.10+, PyYAML, a POSIX host (Linux/macOS). No VISA
 stack, no GUI — instruments are TCP endpoints
@@ -68,7 +76,7 @@ their results directory.
 
 Every task ships **reference solutions in two different idioms** (all must
 pass) — statistics-sensitive tasks add a **third reference with a
-materially different measurement strategy** — and **4-5 mutants**
+materially different measurement strategy** — and **4+ mutants**
 embodying classic field mistakes and known grader exploits (all must
 fail).
 `osicbench validate` enforces both, across seeds — the benchmark grades its

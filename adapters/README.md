@@ -33,6 +33,37 @@ the workspace to `osicbench run`. Label runs by condition
 `osicbench report --runs runs/` aggregate per-condition pass rates and
 paired statistics.
 
+For a planned, repeated-sample comparison, use `matrix_runner.py`. Install
+the repository (`pip install -e .`) first. The agents JSON maps condition
+names to CLI commands and environment overrides; configure and verify
+isolation separately as required by [SPEC.md](SPEC.md).
+
+```bash
+# Bash: use a new output directory and outside-repository work root.
+matrix_args=(--agents agents.json
+             --runs-dir "$PWD/runs/ablation-001"
+             --workdir /tmp/osicbench-ablation-001
+             --seeds 101,102,103,104,105)
+python adapters/matrix_runner.py plan "${matrix_args[@]}" --samples 3
+for condition in bare skilled; do
+  for sample in 1 2 3; do
+    python adapters/matrix_runner.py prep "${matrix_args[@]}" --agent "$condition" --sample "$sample"
+    python adapters/matrix_runner.py author "${matrix_args[@]}" --agent "$condition" --sample "$sample"
+    python adapters/matrix_runner.py grade "${matrix_args[@]}" --agent "$condition" --sample "$sample"
+  done
+done
+python adapters/matrix_runner.py summary "${matrix_args[@]}"
+```
+
+The seeds above illustrate syntax only; choose unpublished seeds for an
+actual evaluation. Planning includes every agent configured in the JSON,
+so the condition loop must match that file. A missing `main.py` remains in
+the report's denominator. Use `author --skip-done` only to resume tasks
+not previously attempted; inspect unresolved attempts before proceeding.
+Do not edit the manifest or reuse an old experiment directory to change
+conditions, sources, artifacts, or budgets. Results without a manifest
+remain supported but are marked coverage-unverified.
+
 ## Mode B (live sessions)
 
 `osicbench live --task ... --seed ... --out ...` starts a farm the agent

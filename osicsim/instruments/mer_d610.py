@@ -93,8 +93,13 @@ class MerD610(SCPIDevice):
         v = self.hub.pull(self.name, "input_v", default=0.0) if self.hub else 0.0
         if self.azer_mode == "OFF" and not self.zeroed:
             v += self._offset_v()
-        v += self.gauss(BASE_SIGMA_V / math.sqrt(nplc))
-        return self.maybe_stuck("v", v)
+        sigma_v = BASE_SIGMA_V / math.sqrt(nplc)
+        v += self.gauss(sigma_v)
+        value = self.maybe_stuck("v", v)
+        if self.recorder is not None:
+            self.recorder.log(self.name, "measurement", value=value,
+                              sigma_v=sigma_v, nplc=nplc)
+        return value
 
     # ------------------------------------------------------------------
 
