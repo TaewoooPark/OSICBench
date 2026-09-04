@@ -1,4 +1,10 @@
-"""Mutant: leaves the default 105 uA compliance and fits the clamped plateau."""
+"""Mutant: sets an undersized 1 uA compliance and fits the clamped plateau.
+
+The default 105 uA limit can distort just one point at the low-current
+parameter corner, leaving an accurate fit. This deliberately insufficient
+limit makes compliance blindness a discriminating negative control across
+the task's parameter domain, without imposing a fitting strategy on agents.
+"""
 import json
 import math
 import os
@@ -25,6 +31,7 @@ out = os.environ["OSIC_RESULTS_DIR"]
 s = socket.create_connection((ep["host"], ep["port"]), timeout=15)
 s.settimeout(15)
 w(s, "SOUR:FUNC VOLT")
+w(s, "SENS:CURR:PROT 1e-6")
 w(s, "OUTP ON")
 q(s, "*OPC?")
 rows = []

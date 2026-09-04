@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "samples": 3,
+  "seeds": [19471, 38459, 62039, 87133, 105943],
+  "schedule_seed": 20260904,
+  "conditions": [
+    {"id": "gpt56-sol-low", "provider": "openai", "model": "gpt-5.6-sol", "effort": "low"},
+    {"id": "gpt56-sol-ultra", "provider": "openai", "model": "gpt-5.6-sol", "effort": "ultra"},
+    {"id": "gpt56-terra-low", "provider": "openai", "model": "gpt-5.6-terra", "effort": "low"},
+    {"id": "gpt56-terra-ultra", "provider": "openai", "model": "gpt-5.6-terra", "effort": "ultra"},
+    {"id": "claude-opus5-low", "provider": "anthropic", "model": "claude-opus-5", "effort": "low"},
+    {"id": "claude-opus5-max", "provider": "anthropic", "model": "claude-opus-5", "effort": "max"},
+    {"id": "claude-sonnet5-low", "provider": "anthropic", "model": "claude-sonnet-5", "effort": "low"},
+    {"id": "claude-sonnet5-max", "provider": "anthropic", "model": "claude-sonnet-5", "effort": "max"}
+  ],
+  "contrasts": [
+    {"id": "sol-effort", "a": "gpt56-sol-low", "b": "gpt56-sol-ultra"},
+    {"id": "terra-effort", "a": "gpt56-terra-low", "b": "gpt56-terra-ultra"},
+    {"id": "opus-effort", "a": "claude-opus5-low", "b": "claude-opus5-max"},
+    {"id": "sonnet-effort", "a": "claude-sonnet5-low", "b": "claude-sonnet5-max"},
+    {"id": "openai-maxima", "a": "gpt56-terra-ultra", "b": "gpt56-sol-ultra"},
+    {"id": "anthropic-maxima", "a": "claude-sonnet5-max", "b": "claude-opus5-max"},
+    {"id": "cross-provider-frontier", "a": "claude-opus5-max", "b": "gpt56-sol-ultra"},
+    {"id": "cross-provider-balanced", "a": "claude-sonnet5-max", "b": "gpt56-terra-ultra"}
+  ]
+}

@@ -41,6 +41,11 @@ The single-run example above remains supported but reports unverified
 coverage without a manifest. Keep validation sweeps and unrelated
 experiments outside the run directory being compared.
 
+For subscription-authenticated Codex and Claude Code evaluations, see the
+[model and native-harness protocol](experiments/model_matrix/README.md).
+It defines isolated runtime checks, model/reasoning conditions, quota guards,
+and publication-safe reporting; a protocol definition is not a score claim.
+
 Requirements: Python 3.10+, PyYAML, a POSIX host (Linux/macOS). No VISA
 stack, no GUI — instruments are TCP endpoints
 (`TCPIP0::127.0.0.1::<port>::SOCKET`). Hidden ground truth stays in a
