@@ -248,7 +248,7 @@ def test_native_policy_refusal_is_valid_identity_but_not_a_successful_answer(tmp
     assert result["provider_refusal_details"] == {
         "category": "cyber", "provider_error": "invalid_request", "provider_error_status": None,
         "terminal_reason": "api_error", "system_subtype": "model_refusal_no_fallback",
-        "original_model": MODEL}
+        "original_model": MODEL, "envelope_count": 1}
     assert result["effort_verification"] == "launch_configuration_only"
     assert result["incomplete_trace_accepted"] is False
     assert "Neutral policy-refusal" not in json.dumps(result)
@@ -389,3 +389,168 @@ def test_clean_success_has_no_refusal_classification(tmp_path):
     assert result["completion_status"] == "completed_successfully"
     assert result["provider_refusal"] is False
     assert result["provider_refusal_details"] is None
+
+
+def _repeated_refusal_events():
+    """Neutral fixture for the exact evidenced two-request refusal sequence."""
+    base = _events()
+    explanation = "Neutral repeated policy-refusal explanation."
+
+    def native(request_id, event_id):
+        return {"type": "system", "subtype": "model_refusal_no_fallback",
+                "request_id": request_id, "uuid": event_id,
+                "refused_user_message_uuid": "user-message-1", "original_model": MODEL,
+                "api_refusal_category": "cyber", "content": "Native refusal content.",
+                "api_refusal_explanation": explanation}
+
+    def synthetic(request_id, event_id, text):
+        return {"type": "assistant", "request_id": request_id, "uuid": event_id,
+                "error": "invalid_request", "is_api_error_message": True,
+                "message": {"model": "<synthetic>", "stop_reason": "refusal",
+                            "stop_details": {"type": "refusal", "category": "cyber",
+                                             "explanation": explanation},
+                            "content": [{"type": "text", "text": text}]}}
+
+    final = base[-1]
+    final.update(is_error=True, stop_reason="refusal", terminal_reason="api_error",
+                 api_error_status=None)
+    return [
+        base[0], base[2],
+        {"type": "assistant", "message": {"model": MODEL,
+                                           "content": [{"type": "text", "text": "Working."}]}},
+        {"type": "assistant", "message": {"model": MODEL, "content": [
+            {"type": "tool_use", "name": "Bash", "id": "tool-use-1", "input": {"command": "true"}}]}},
+        native("request-1", "system-1"),
+        synthetic("request-1", "assistant-1", "First provider refusal."),
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tool-use-1", "is_error": False,
+             "content": "Command completed."}]},
+         "tool_use_result": {"interrupted": False, "isImage": False,
+                             "noOutputExpected": False, "stdout": "", "stderr": ""}},
+        native("request-2", "system-2"),
+        synthetic("request-2", "assistant-2", "Second provider refusal."),
+        final,
+    ]
+
+
+def test_exact_repeated_native_refusal_is_a_valid_nonsuccess_outcome(tmp_path):
+    result = _inspect(tmp_path, _repeated_refusal_events())
+    assert result["valid"] is True and result["errors"] == []
+    assert result["provider_refusal"] is True and result["completion_successful"] is False
+    assert result["completion_status"] == "completed_provider_refusal"
+    assert result["resolved_model"] == MODEL and result["primary_models"] == [MODEL]
+    assert result["provider_refusal_details"]["envelope_count"] == 2
+    assert result["tools_used"] == ["Bash"]
+    encoded = json.dumps(result)
+    for private_metadata in ("request-1", "request-2", "user-message-1", "system-1",
+                             "assistant-1", "Native refusal content", "Neutral repeated"):
+        assert private_metadata not in encoded
+
+
+@pytest.mark.parametrize("violation", [
+    "shared_request", "unmatched_request", "missing_request", "different_user", "empty_user",
+    "wrong_model", "wrong_category", "different_content", "different_native_explanation",
+    "different_synthetic_explanation", "missing_tool_result", "extra_user_event",
+    "tool_result_error", "tool_interrupted", "tool_image", "tool_no_output_expected",
+    "malformed_tool_output", "unmatched_tool_id", "missing_prior_tool_use", "out_of_order",
+    "extra_prior_tool_use", "non_bash_tool", "pre_refusal_noise", "malformed_prior_content",
+    "interposed_noise", "missing_native_content",
+    "missing_native_explanation", "reversed_pairs", "third_native", "third_synthetic",
+])
+def test_repeated_refusal_requires_exact_pairing_and_interposed_tool_result(tmp_path, violation):
+    events = _repeated_refusal_events()
+    if violation == "shared_request":
+        events[7]["request_id"] = events[8]["request_id"] = "request-1"
+    elif violation == "unmatched_request":
+        events[8]["request_id"] = "unmatched-request"
+    elif violation == "missing_request":
+        del events[7]["request_id"]
+    elif violation == "different_user":
+        events[7]["refused_user_message_uuid"] = "user-message-2"
+    elif violation == "empty_user":
+        events[7]["refused_user_message_uuid"] = ""
+    elif violation == "wrong_model":
+        events[7]["original_model"] = "claude-sonnet-5"
+    elif violation == "wrong_category":
+        events[7]["api_refusal_category"] = "different"
+    elif violation == "different_content":
+        events[7]["content"] = "Different native content."
+    elif violation == "different_native_explanation":
+        events[7]["api_refusal_explanation"] = "Different explanation."
+    elif violation == "different_synthetic_explanation":
+        events[8]["message"]["stop_details"]["explanation"] = "Different explanation."
+    elif violation == "missing_tool_result":
+        del events[6]
+    elif violation == "extra_user_event":
+        events.insert(7, json.loads(json.dumps(events[6])))
+    elif violation == "tool_result_error":
+        events[6]["message"]["content"][0]["is_error"] = True
+    elif violation == "tool_interrupted":
+        events[6]["tool_use_result"]["interrupted"] = True
+    elif violation == "tool_image":
+        events[6]["tool_use_result"]["isImage"] = True
+    elif violation == "tool_no_output_expected":
+        events[6]["tool_use_result"]["noOutputExpected"] = True
+    elif violation == "malformed_tool_output":
+        events[6]["tool_use_result"]["stdout"] = None
+    elif violation == "unmatched_tool_id":
+        events[6]["message"]["content"][0]["tool_use_id"] = "another-tool"
+    elif violation == "missing_prior_tool_use":
+        events[3]["message"]["content"][0]["id"] = "another-tool"
+    elif violation == "extra_prior_tool_use":
+        events[3]["message"]["content"].append(
+            {"type": "tool_use", "name": "Read", "id": "unused-tool", "input": {}})
+    elif violation == "non_bash_tool":
+        events[3]["message"]["content"][0]["name"] = "Read"
+    elif violation == "pre_refusal_noise":
+        events.insert(4, {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}})
+    elif violation == "malformed_prior_content":
+        events[3]["message"]["content"] = 1
+    elif violation == "interposed_noise":
+        events.insert(5, {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}})
+    elif violation == "missing_native_content":
+        del events[7]["content"]
+    elif violation == "missing_native_explanation":
+        del events[7]["api_refusal_explanation"]
+    elif violation == "out_of_order":
+        events[6], events[7] = events[7], events[6]
+    elif violation == "reversed_pairs":
+        events[4], events[7] = events[7], events[4]
+    elif violation == "third_native":
+        events.insert(-1, json.loads(json.dumps(events[7])))
+    elif violation == "third_synthetic":
+        events.insert(-1, json.loads(json.dumps(events[8])))
+    result = _inspect(tmp_path, events, allow_incomplete=True)
+    assert result["valid"] is False and result["provider_refusal"] is False
+    assert result["incomplete_trace_accepted"] is False
+    assert "native_provider_refusal_unverified" in result["errors"]
+
+
+@pytest.mark.parametrize("violation,expected_error", [
+    ("auth", "subscription_auth_not_confirmed"),
+    ("customization", "unexpected_or_missing_skills"),
+    ("quota", "rate_limit_not_allowed"),
+    ("overage", "paid_overage_observed"),
+    ("fallback", "model_fallback_observed"),
+    ("other_model", "primary_model_mismatch"),
+    ("http_status", "native_provider_refusal_unverified"),
+])
+def test_repeated_refusal_retains_every_independent_audit_gate(tmp_path, violation, expected_error):
+    events = _repeated_refusal_events()
+    if violation == "auth":
+        events[0]["apiKeySource"] = "environment"
+    elif violation == "customization":
+        events[0]["skills"] = ["ambient"]
+    elif violation == "quota":
+        events[1]["rate_limit_info"]["status"] = "rejected"
+    elif violation == "overage":
+        events[1]["rate_limit_info"]["isUsingOverage"] = True
+    elif violation == "fallback":
+        events.insert(2, {"type": "model_fallback"})
+    elif violation == "other_model":
+        events[2]["message"]["model"] = "claude-sonnet-5"
+    elif violation == "http_status":
+        events[-1]["api_error_status"] = 429
+    result = _inspect(tmp_path, events)
+    assert result["valid"] is False and result["provider_refusal"] is False
+    assert expected_error in result["errors"]

@@ -108,11 +108,12 @@ def _native_refusal(events: list[dict], inits: list[dict], finals: list[dict], m
     refusal category, and the native terminal error. Explanations, request IDs,
     and generated content are intentionally not copied into the audit.
     """
-    refusals = [event for event in events if event.get("type") == "system"
-                and event.get("subtype") == "model_refusal_no_fallback"]
-    if len(inits) != 1 or len(finals) != 1 or len(refusals) != 1:
+    indexed_refusals = [(index, event) for index, event in enumerate(events)
+                        if event.get("type") == "system"
+                        and event.get("subtype") == "model_refusal_no_fallback"]
+    if len(inits) != 1 or len(finals) != 1 or len(indexed_refusals) not in (1, 2):
         return None
-    init, final, refusal = inits[0], finals[0], refusals[0]
+    init, final, refusal = inits[0], finals[0], indexed_refusals[0][1]
     category = refusal.get("api_refusal_category")
     model_usage = final.get("modelUsage")
     if (init.get("model") != model or refusal.get("original_model") != model
@@ -121,8 +122,8 @@ def _native_refusal(events: list[dict], inits: list[dict], finals: list[dict], m
             or final.get("stop_reason") != "refusal" or final.get("terminal_reason") != "api_error"
             or not isinstance(model_usage, dict) or not isinstance(model_usage.get(model), dict)):
         return None
-    synthetic = []
-    for event in events:
+    indexed_synthetic = []
+    for index, event in enumerate(events):
         if event.get("type") not in ("assistant", "result") and event not in inits:
             continue
         message = event.get("message") if event.get("type") == "assistant" else None
@@ -139,19 +140,90 @@ def _native_refusal(events: list[dict], inits: list[dict], finals: list[dict], m
                     or message.get("stop_reason") != "refusal" or not isinstance(details, dict)
                     or details.get("type") != "refusal" or details.get("category") != category):
                 return None
-            synthetic.append(event)
-    if len(synthetic) != 1:
+            indexed_synthetic.append((index, event))
+    if len(indexed_synthetic) != len(indexed_refusals):
         return None
-    if not (events.index(init) < events.index(refusal) < events.index(synthetic[0]) < events.index(final)):
+    init_index, final_index = events.index(init), events.index(final)
+    if len(indexed_refusals) == 1 and not (
+            init_index < indexed_refusals[0][0] < indexed_synthetic[0][0] < final_index):
         return None
+    if len(indexed_refusals) == 2:
+        refusal_events = [event for _, event in indexed_refusals]
+        synthetic_events = [event for _, event in indexed_synthetic]
+
+        def marker(value):
+            return isinstance(value, str) and 0 < len(value) <= 512
+
+        refusal_requests = [event.get("request_id") for event in refusal_events]
+        synthetic_requests = [event.get("request_id") for event in synthetic_events]
+        refused_users = [event.get("refused_user_message_uuid") for event in refusal_events]
+        if (not all(marker(value) for value in refusal_requests + synthetic_requests + refused_users)
+                or len(set(refusal_requests)) != 2 or len(set(synthetic_requests)) != 2
+                or set(refusal_requests) != set(synthetic_requests) or len(set(refused_users)) != 1):
+            return None
+        native_fields = ("original_model", "api_refusal_category", "content", "api_refusal_explanation")
+        if (any(event.get("original_model") != model for event in refusal_events)
+                or any(not isinstance(event.get(field), str) for event in refusal_events
+                       for field in ("content", "api_refusal_explanation"))
+                or any(event.get(field) != refusal_events[0].get(field)
+                       for event in refusal_events[1:] for field in native_fields)):
+            return None
+        synthetic_by_request = {event["request_id"]: (index, event)
+                                for index, event in indexed_synthetic}
+        ordered_pairs = [(index, synthetic_by_request[event["request_id"]][0], event,
+                          synthetic_by_request[event["request_id"]][1])
+                         for index, event in indexed_refusals]
+        if any(system_index >= assistant_index for system_index, assistant_index, _, _ in ordered_pairs):
+            return None
+        native_explanation = refusal_events[0]["api_refusal_explanation"]
+        if any(pair[3]["message"]["stop_details"].get("explanation") != native_explanation
+               for pair in ordered_pairs):
+            return None
+        interposed = [(index, event) for index, event in enumerate(events)
+                      if event.get("type") == "user"]
+        if len(interposed) != 1:
+            return None
+        user_index, user_event = interposed[0]
+        user_message = user_event.get("message")
+        content = user_message.get("content") if isinstance(user_message, dict) else None
+        tool_result = user_event.get("tool_use_result")
+        if (not isinstance(user_message, dict) or user_message.get("role") != "user" or not isinstance(content, list)
+                or len(content) != 1 or not isinstance(content[0], dict)
+                or content[0].get("type") != "tool_result" or content[0].get("is_error") is not False
+                or not marker(content[0].get("tool_use_id")) or not isinstance(tool_result, dict)
+                or any(tool_result.get(field) is not False
+                       for field in ("interrupted", "isImage", "noOutputExpected"))
+                or not all(isinstance(tool_result.get(field), str) for field in ("stdout", "stderr"))):
+            return None
+        prior_uses = []
+        prior_use_index = None
+        for index, event in enumerate(events):
+            message = event.get("message")
+            items = message.get("content") if isinstance(message, dict) else None
+            if index >= indexed_refusals[0][0] or event.get("type") != "assistant" or not isinstance(items, list):
+                continue
+            uses = [item for item in items if isinstance(item, dict) and item.get("type") == "tool_use"]
+            if uses:
+                prior_uses.extend(uses)
+                prior_use_index = index
+        if (len(prior_uses) != 1 or prior_uses[0].get("name") != "Bash"
+                or prior_uses[0].get("id") != content[0]["tool_use_id"]
+                or prior_use_index != indexed_refusals[0][0] - 1):
+            return None
+        first, second = ordered_pairs
+        if not (init_index < first[0] and first[1] == first[0] + 1
+                and user_index == first[1] + 1 and second[0] == user_index + 1
+                and second[1] == second[0] + 1 and final_index == second[1] + 1):
+            return None
     status = final.get("api_error_status")
     # The verified native refusal has no HTTP error status. Do not reinterpret
     # explicit authentication, quota, server, or unverified HTTP errors.
     if status is not None:
         return None
-    return {"category": category, "provider_error": synthetic[0]["error"],
+    return {"category": category, "provider_error": indexed_synthetic[0][1]["error"],
             "provider_error_status": status, "terminal_reason": final["terminal_reason"],
-            "system_subtype": refusal["subtype"], "original_model": refusal["original_model"]}
+            "system_subtype": refusal["subtype"], "original_model": refusal["original_model"],
+            "envelope_count": len(indexed_refusals)}
 
 
 def inspect_trace(stdout_path: Path, stderr_path: Path, model: str, effort: str,
