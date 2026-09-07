@@ -503,7 +503,9 @@ def suspended(amendment, monkeypatch):
                   attempts=[dict(result, number=1, status="completed",
                                  subscription_precheck=subscription)],
                   provider_audit=audited,
-                  subscription_precheck=subscription, subscription_prechecks=[subscription],
+                  subscription_precheck=subscription,
+                  subscription_prechecks=[{"checked_at": "2026-09-07T00:00:00+00:00",
+                                           "result": subscription}],
                   subscription_guard={"stop": False, "reason": None, "rate_limited": False})
     runner._save_record(runner._record_path(source, target), record)
     (source / ".runner.lock").touch()

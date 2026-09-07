@@ -1230,10 +1230,14 @@ def _validate_suspend_target(source: Path, target: dict, manifest: dict,
              and abs(epoch - active) > 2 and runtime.clock_discontinuity(epoch, active),
              "Suspension timing does not independently prove a clock discontinuity")
     subscription = record.get("subscription_precheck", {})
+    history = record.get("subscription_prechecks")
     guard = record.get("subscription_guard", {})
     rate_events = audit.get("rate_limit", {}).get("events", [])
     _require(subscription.get("allowed") is True and subscription.get("paid_usage_enabled") is False
-             and record.get("subscription_prechecks") == [subscription]
+             and isinstance(history, list) and len(history) == 1
+             and isinstance(history[0], dict) and set(history[0]) == {"checked_at", "result"}
+             and isinstance(history[0].get("checked_at"), str)
+             and history[0].get("result") == subscription
              and attempt.get("subscription_precheck") == subscription
              and guard == {"stop": False, "reason": None, "rate_limited": False}
              and audit.get("rate_limited") is False
