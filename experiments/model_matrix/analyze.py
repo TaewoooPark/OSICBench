@@ -18,7 +18,9 @@ from osicbench.stats import mcnemar_exact_p
 
 
 IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]*\Z")
-FAILURE_REASONS = {"missing_author_artifact", "grading_timeout", "grading_error"}
+HOST_SUSPENSION_FAILURE = "host_suspend_or_clock_discontinuity"
+FAILURE_REASONS = {"missing_author_artifact", "grading_timeout", "grading_error",
+                   HOST_SUSPENSION_FAILURE}
 TOKEN_FIELDS = {
     "input_tokens", "output_tokens", "total_tokens", "cached_input_tokens",
     "cache_creation_input_tokens", "cache_read_input_tokens", "reasoning_output_tokens",
@@ -36,6 +38,7 @@ CAVEATS = [
     "HSS-applicable summaries include only tasks with nonempty task.yaml safety rules; no safety claim is made for undeclared hazards.",
     "Provider-reported tokens or price estimates do not establish subscription billing. Unavailable costs are not inferred from elapsed time.",
     "Provider refusals without submissions are operational nonpasses, not graded evidence of instrument-control competence. Their DFS/HSS/RS and transaction counts remain unmeasured, not zero.",
+    "Host-suspension or clock-discontinuity failures are infrastructure operational nonpasses. They are not provider refusals or graded evidence, and their DFS/HSS/RS and transaction counts remain unmeasured.",
 ]
 
 
@@ -127,16 +130,60 @@ def public_migration(value: dict) -> dict:
     return out
 
 
+def _host_suspension_outcome(record: dict):
+    attempts = record.get("attempts")
+    audit = record.get("provider_audit")
+    outcome = record.get("outcome")
+    if ((outcome is not None and outcome != HOST_SUSPENSION_FAILURE)
+            or record.get("status") != "blocked"
+            or record.get("stop_reason") != "invalid_provider_audit"
+            or record.get("eligible_for_grading") is not False
+            or record.get("artifact_present") is not False
+            or record.get("artifact_sha256") is not None
+            or not isinstance(attempts, list) or len(attempts) != 1
+            or any(not isinstance(attempt, dict) for attempt in attempts)
+            or record.get("orchestration_error") is not None):
+        raise ValueError("Invalid host-suspension operational failure")
+    if any(attempt.get("launch_error") or attempt.get("cleanup_error") for attempt in attempts):
+        raise ValueError("Host-suspension evidence cannot include launch or cleanup failures")
+    last = attempts[-1]
+    if (last.get("status") != "completed" or last.get("timed_out") is not True
+            or last.get("clock_discontinuity") is not True
+            or last.get("exit_code") is not None
+            or last.get("artifact_present") is not False
+            or last.get("artifact_sha256") is not None):
+        raise ValueError("Inconsistent host-suspension terminal attempt")
+    if (not isinstance(audit, dict) or audit.get("valid") is not False
+            or audit.get("errors") != [HOST_SUSPENSION_FAILURE]
+            or audit.get("provider_refusal") is not False
+            or audit.get("completion_successful") is not False
+            or audit.get("completion_status") != "incomplete_or_error"):
+        raise ValueError("Inconsistent host-suspension provider audit")
+    if "provider_audit" in last and last["provider_audit"] != audit:
+        raise ValueError("Host-suspension attempt and record audits differ")
+
+
 def author_outcome(record: dict) -> str | None:
-    """Historical records need not have outcomes; declared refusals must agree."""
-    audit = record.get("provider_audit", {})
-    completion = public_completion(audit) if isinstance(audit, dict) else {}
+    """Derive narrow operational outcomes while retaining historical compatibility."""
     outcome = record.get("outcome")
     if record.get("status") == "deferred" and (record.get("attempts") or record.get("artifact_present")
                                                 or record.get("artifact_sha256") is not None or outcome is not None):
         raise ValueError("Deferred authoring records cannot contain an attempt, artifact, or outcome")
+    audit = record.get("provider_audit", {})
+    attempts = record.get("attempts")
+    last = attempts[-1] if isinstance(attempts, list) and attempts else {}
+    errors = audit.get("errors") if isinstance(audit, dict) else None
+    host_suspension_evidence = (outcome == HOST_SUSPENSION_FAILURE
+                                or (isinstance(errors, list)
+                                    and HOST_SUSPENSION_FAILURE in errors)
+                                or (isinstance(last, dict)
+                                    and last.get("clock_discontinuity") is True))
+    if host_suspension_evidence:
+        _host_suspension_outcome(record)
+        return HOST_SUSPENSION_FAILURE
     if outcome is not None and outcome != "provider_refusal":
         raise ValueError("Unsupported declared authoring outcome")
+    completion = public_completion(audit) if isinstance(audit, dict) else {}
     refused = completion.get("provider_refusal") is True
     if outcome == "provider_refusal" and not refused:
         raise ValueError("Provider refusal outcome lacks matching audit evidence")
@@ -214,19 +261,27 @@ def _run_rows(root: Path, expected: list[dict], report: dict) -> list[dict]:
         if author_key not in outcomes:
             author = root / "authoring" / row["label"] / f"{row['task']}.json"
             outcomes[author_key] = author_outcome(json.loads(author.read_text())) if author.exists() else None
-        if outcomes[author_key] == "provider_refusal" and grade is not None:
-            raise ValueError("A no-artifact provider refusal cannot have instrument grades")
+        if outcomes[author_key] in {"provider_refusal", HOST_SUSPENSION_FAILURE} and grade is not None:
+            raise ValueError("A no-artifact authoring outcome cannot have instrument grades")
         row.update(status=absent["status"] if absent else "graded",
                    passed=False if absent else grade["pass"],
                    failure_reason=None, hss_findings_observed=False,
                    hss_failed_rules=None, hss_required_failed_rules=None)
-        row.update(authoring_outcome=outcomes[author_key], provider_refusal=outcomes[author_key] == "provider_refusal")
+        row.update(authoring_outcome=outcomes[author_key],
+                   provider_refusal=outcomes[author_key] == "provider_refusal",
+                   operational_failure=outcomes[author_key] == HOST_SUSPENSION_FAILURE)
         if absent:
-            reason = absent.get("failure", {}).get("reason")
+            failure = absent.get("failure", {})
+            reason = failure.get("reason")
             row["failure_reason"] = (reason if reason in FAILURE_REASONS else
                                      "other_recorded_failure" if reason is not None else "not_recorded")
             if row["provider_refusal"] and reason is not None and reason != "missing_author_artifact":
                 raise ValueError("Provider refusal failure accounting must preserve missing_author_artifact")
+            if (row["operational_failure"]
+                    and (reason != HOST_SUSPENSION_FAILURE or failure.get("stage") != "authoring")):
+                raise ValueError("Host-suspension failure accounting must preserve its operational reason")
+            if reason == HOST_SUSPENSION_FAILURE and not row["operational_failure"]:
+                raise ValueError("Host-suspension failure accounting requires matching author evidence")
         for field in ("dfs", "hss", "rs", "transactions"):
             row[field] = _number(grade.get(field), field) if grade is not None else None
         row["fabricated"] = bool(grade.get("fabricated")) if grade else None
@@ -258,6 +313,10 @@ def _coverage(rows: list[dict]) -> dict:
             "missing_runs_or_grades": len(rows) - len(graded),
             "provider_refusal_runs": sum(row["provider_refusal"] for row in rows),
             "provider_refusal_missing_artifact_failures": sum(row["provider_refusal"] and row["failure_reason"] == "missing_author_artifact" for row in rows),
+            "operational_failure_runs": sum(row["operational_failure"] for row in rows),
+            "host_suspend_or_clock_discontinuity_failures": sum(
+                row["operational_failure"] and row["failure_reason"] == HOST_SUSPENSION_FAILURE
+                for row in rows),
             "failure_reasons": dict(sorted(Counter(row["failure_reason"] for row in rows
                                                     if row["failure_reason"] is not None).items()))}
 
@@ -278,7 +337,7 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
     identities = sorted({(r["label"], r["task"]) for r in expected})
     times, attempts, timed_out, records, audits = [], 0, 0, 0, 0
     audit_valid, audit_invalid, rate_limited = 0, 0, 0
-    refusals, migrated, refusal_categories = [], [], Counter()
+    refusals, operational_failures, migrated, refusal_categories = [], [], [], Counter()
     model_fields = {key: set() for key in ("requested_model", "requested_effort",
                                          "resolved_model", "resolved_effort", "observed_primary_models")}
     token_values = {key: [] for key in TOKEN_FIELDS}
@@ -295,6 +354,9 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
             completion = public_completion(record["provider_audit"])
             refusal_categories[completion["refusal_category"]] += 1
             refusals.append({"label": label, "task": task, **completion})
+        elif outcome == HOST_SUSPENSION_FAILURE:
+            operational_failures.append({"label": label, "task": task,
+                                         "reason": HOST_SUSPENSION_FAILURE})
         if "migration" in record:
             migrated.append({"label": label, "task": task, **public_migration(record["migration"])})
         wall_s = _number(record.get("wall_s"), "authoring wall_s")
@@ -336,7 +398,9 @@ def _authoring(root: Path, expected: list[dict]) -> dict:
             "provider_rate_limited_records": rate_limited,
             "provider_refusal_records": len(refusals),
             "provider_refusal_categories": dict(sorted(refusal_categories.items())),
-            "provider_refusals": refusals, "imported_records": migrated,
+            "provider_refusals": refusals,
+            "operational_failure_records": len(operational_failures),
+            "operational_failures": operational_failures, "imported_records": migrated,
             "provider_model_observations": {key: sorted(values) for key, values in model_fields.items()},
             "token_usage": {key: {"total": sum(values), "observed_artifacts": len(values)}
                             for key, values in sorted(token_values.items()) if values} or None,
@@ -387,6 +451,8 @@ def build_analysis(runs_root: Path, tasks_root: Path) -> dict:
         value = manifest.get(field)
         provenance[field] = value if isinstance(value, str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value) else None
     out = {"schema_version": 1, "track": "public_development_native_harness_matrix",
+           "quality_ranking_claim": False,
+           "pass_accounting": "planned_denominator_operational",
            "provenance": provenance,
            "design": {"conditions": len(condition_ids), "authoring_samples": len(sample_ids),
                       "tasks": len(task_ids),
@@ -427,7 +493,7 @@ def build_analysis(runs_root: Path, tasks_root: Path) -> dict:
             "authoring": _authoring(root, [r for r in expected if r["condition"] == condition]),
         }
     if any(item["authoring"]["provider_audit_invalid_records"] for item in out["conditions"].values()):
-        out["caveats"].append("Some provider audits are invalid; their observed artifacts remain in operational accounting, but resolved model/harness attribution is not fully verified.")
+        out["caveats"].append("Some provider audits are invalid; their records and any artifacts remain in operational accounting, but resolved model/harness attribution is not fully verified.")
     for contrast in contrasts:
         samples = {str(sample): _paired(contrast, rows, sample) for sample in sample_ids}
         out["contrasts"].append({**contrast, "samples": samples,
@@ -457,8 +523,10 @@ def render_markdown(analysis: dict) -> str:
              f"{len(design['evaluation_seeds'])} evaluation seeds.", "",
              f"Observed grades: {coverage['graded_runs']}/{coverage['planned_runs']}. "
              f"Missing runs or grades: {coverage['missing_runs_or_grades']}.", "",
+             "Pass denominators below retain recorded operational failures as nonpasses; "
+             "model-quality metrics use observed grades only.", "",
              "## Condition summaries", "",
-             "| Condition | Mean task pass | Sample SD | Sample range | Graded / planned | DFS | Applicable HSS | Reported RS |",
+             "| Condition | Mean operational task pass | Sample SD | Sample range | Graded / planned | DFS | Applicable HSS | Reported RS |",
              "|---|---|---|---|---|---|---|---|"]
     for condition, item in analysis["conditions"].items():
         spread, cov = item["sample_task_pass_rates"], item["coverage"]
@@ -470,7 +538,7 @@ def render_markdown(analysis: dict) -> str:
                      f"| {_formatted(item['metrics']['dfs']['mean'])} "
                      f"| {_formatted(hss['mean'])} ({hss['observed_runs']}/{hss['planned_runs']}) "
                      f"| {_formatted(rs['mean'])} ({rs['observed_runs']}/{rs['planned_runs']}) |")
-    lines.extend(["", "## Authoring-sample task pass", "",
+    lines.extend(["", "## Authoring-sample operational task pass", "",
                   "| Condition | Sample | Tasks passed / planned | Task pass | Within-sample Wilson interval |",
                   "|---|---|---|---|---|"])
     for condition, item in analysis["conditions"].items():
@@ -479,8 +547,8 @@ def render_markdown(analysis: dict) -> str:
             lines.append(f"| {condition} | {sample} | {task_pass['passed']}/{task_pass['total']} "
                          f"| {_formatted(task_pass['rate'], percent=True)} "
                          f"| [{_formatted(task_pass['ci_lo'], percent=True)}, {_formatted(task_pass['ci_hi'], percent=True)}] |")
-    lines.extend(["", "## Matched sample comparisons", "",
-                  "All deltas are condition B minus condition A. There is no cross-sample pooled test.", "",
+    lines.extend(["", "## Matched sample operational comparisons", "",
+                  "All deltas are condition B minus condition A. Recorded infrastructure failures remain operational nonpasses, not model-quality observations. There is no cross-sample pooled test.", "",
                   "| Contrast | A | B | Sample | Task delta | Discordant A/B | Raw p | Holm p | Family size |",
                   "|---|---|---|---|---|---|---|---|---|"])
     for contrast in analysis["contrasts"]:
@@ -499,12 +567,13 @@ def render_markdown(analysis: dict) -> str:
         lines.append(f"| {contrast['id']} | {100 * spread['mean']:.2f} pp | {stddev} "
                      f"| [{100 * spread['min']:.2f}, {100 * spread['max']:.2f}] pp |")
     lines.extend(["", "## Authoring coverage", "",
-                  "| Condition | Records / planned artifacts | Provider refusals | Timed-out attempts | Observed wall seconds | Timing coverage |",
-                  "|---|---|---|---|---|---|"])
+                  "| Condition | Records / planned artifacts | Provider refusals | Operational failures | Timed-out attempts | Observed wall seconds | Timing coverage |",
+                  "|---|---|---|---|---|---|---|"])
     for condition, item in analysis["conditions"].items():
         author = item["authoring"]
         lines.append(f"| {condition} | {author['records_observed']}/{author['planned_artifacts']} "
-                     f"| {author['provider_refusal_records']} | {author['timed_out_attempts_observed']} | {_formatted(author['wall_s_total'])} "
+                     f"| {author['provider_refusal_records']} | {author['operational_failure_records']} "
+                     f"| {author['timed_out_attempts_observed']} | {_formatted(author['wall_s_total'])} "
                      f"| {author['wall_s_observed_artifacts']}/{author['planned_artifacts']} |")
     lines.extend(["", "## Interpretation and limitations", ""])
     lines.extend(f"- {caveat}" for caveat in analysis["caveats"])

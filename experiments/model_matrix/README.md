@@ -103,7 +103,10 @@ prompts, task inputs, models, native launch configuration, budgets, schedule,
 and grading code are unchanged. The original plan, records, and artifacts
 remain immutable. Reclassification is reported explicitly; it must not cause
 new generations or select a better artifact. See the
-[native-refusal amendment](amendments/2026-09-04-native-refusal.md).
+[native-refusal amendment](amendments/2026-09-04-native-refusal.md). A sealed
+host-suspension attempt may instead be accounted without retry under the
+[host-suspension amendment](amendments/2026-09-07-host-suspension.md); it
+remains infrastructure evidence and never receives instrument-quality scores.
 
 The schedule is balanced across conditions within task/sample blocks, using
 the predeclared randomization seed. Begin with at most one active authoring

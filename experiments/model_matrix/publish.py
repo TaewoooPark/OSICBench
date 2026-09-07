@@ -164,8 +164,12 @@ def _audit(record: dict) -> dict:
     source = record.get("provider_audit", {})
     if not isinstance(source, dict):
         return {}
+    outcome = analyze.author_outcome(record)
     result = {key: source[key] for key in ("valid", "rate_limited") if type(source.get(key)) is bool}
     result.update(analyze.public_completion(source))
+    if (outcome == analyze.HOST_SUSPENSION_FAILURE
+            and source.get("errors") == [analyze.HOST_SUSPENSION_FAILURE]):
+        result["errors"] = [analyze.HOST_SUSPENSION_FAILURE]
     for key in AUDIT_IDENTITIES:
         if source.get(key) is not None:
             result[key] = _identity(source[key])
@@ -189,6 +193,8 @@ def _author_public_fields(record: dict, raw: bytes) -> dict:
     result = {"private_record_file_sha256": hashlib.sha256(raw).hexdigest()}
     if record.get("status") == "completed" and not isinstance(record.get("record_sha256"), str):
         _reject("completed_author_missing_sealed_digest")
+    if outcome == analyze.HOST_SUSPENSION_FAILURE and not isinstance(record.get("record_sha256"), str):
+        _reject("operational_failure_missing_sealed_digest")
     if record.get("record_sha256") is not None:
         unsigned = {key: value for key, value in record.items() if key != "record_sha256"}
         actual = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":"),
@@ -199,6 +205,8 @@ def _author_public_fields(record: dict, raw: bytes) -> dict:
         result["outcome"] = outcome
     if record.get("status") in {"completed", "blocked", "running", "retry_pending", "deferred"}:
         result["status"] = record["status"]
+    if outcome == analyze.HOST_SUSPENSION_FAILURE:
+        result["stop_reason"] = "invalid_provider_audit"
     for field in ("eligible_for_grading", "artifact_present"):
         if field in record:
             if type(record[field]) is not bool:
@@ -220,6 +228,30 @@ def _author_public_fields(record: dict, raw: bytes) -> dict:
         prefix = f"{record.get('label')}/{record.get('task')}/"
         if any(not call.startswith(prefix) for call in result["migration"]["call_ids"]):
             _reject("imported_record_call_identity_mismatch")
+    return result
+
+
+def _public_attempts(record: dict) -> list[dict]:
+    attempts = record.get("attempts", [])
+    if not isinstance(attempts, list):
+        _reject("invalid_author_attempts")
+    outcome = analyze.author_outcome(record)
+    result = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            if outcome == analyze.HOST_SUSPENSION_FAILURE:
+                _reject("invalid_operational_failure_attempt")
+            continue
+        public = {"timed_out": attempt.get("timed_out") is True}
+        if outcome == analyze.HOST_SUSPENSION_FAILURE:
+            public.update(status=attempt.get("status"),
+                          clock_discontinuity=attempt.get("clock_discontinuity") is True,
+                          exit_code=attempt.get("exit_code"),
+                          artifact_present=attempt.get("artifact_present") is True,
+                          artifact_sha256=attempt.get("artifact_sha256"),
+                          launch_error=bool(attempt.get("launch_error")),
+                          cleanup_error=bool(attempt.get("cleanup_error")))
+        result.append(public)
     return result
 
 
@@ -339,6 +371,24 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
                 if not isinstance(failure.get("reason"), str):
                     _reject("invalid_failure_accounting", base)
                 reason = failure["reason"] if failure["reason"] in analyze.FAILURE_REASONS else "other_recorded_failure"
+                if (reason == analyze.HOST_SUSPENSION_FAILURE
+                        and failure.get("stage") != "authoring"):
+                    _reject("invalid_operational_failure_stage", base)
+                if reason == analyze.HOST_SUSPENSION_FAILURE:
+                    author_relative = f"authoring/{row['label']}/{row['task']}.json"
+                    author_path = root / author_relative
+                    if not author_path.is_file():
+                        _reject("operational_failure_missing_author_record", base)
+                    author = _json(_read(author_path, author_relative), author_relative)
+                    if any(author.get(field) != row[field]
+                           for field in ("label", "condition", "sample", "task")):
+                        _reject("operational_failure_author_identity_mismatch", base)
+                    try:
+                        outcome = analyze.author_outcome(author)
+                    except (ValueError, TypeError, KeyError):
+                        _reject("invalid_operational_failure_author", base)
+                    if outcome != analyze.HOST_SUSPENSION_FAILURE:
+                        _reject("operational_failure_missing_author_evidence", base)
                 public_failure = {**row, "reason": reason}
                 if failure.get("stage") in ("authoring", "grading"):
                     public_failure["stage"] = failure["stage"]
@@ -416,9 +466,7 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
             sanitized.update(_author_public_fields(author, author_bytes))
             if type(author.get("wall_s")) in (int, float):
                 sanitized["wall_s"] = author["wall_s"]
-            attempts = author.get("attempts", [])
-            sanitized["attempts"] = [{"timed_out": attempt.get("timed_out") is True}
-                                      for attempt in attempts if isinstance(attempt, dict)]
+            sanitized["attempts"] = _public_attempts(author)
             add(author_relative, _encoded(sanitized), original=author_bytes)
             artifacts[f"{row['label']}/{row['task']}"] = {"original_artifact_sha256": fingerprint,
                                                           "exported_files": sorted(selected)}
@@ -444,15 +492,14 @@ def _build_bundle(runs_root: Path, tasks_root: Path, out_dir: Path, stage: Path)
         if any(record.get(field) != row[field] for field in ("label", "condition", "sample", "task")):
             _reject("author_identity_mismatch", relative)
         sanitized = {field: row[field] for field in ("label", "condition", "sample", "task")}
+        if (analyze.author_outcome(record) == analyze.HOST_SUSPENSION_FAILURE
+                and (root / "private/artifacts" / label / task).exists()):
+            _reject("operational_failure_has_artifact", relative)
         sanitized["provider_audit"] = _audit(record)
         sanitized.update(_author_public_fields(record, raw))
         if type(record.get("wall_s")) in (int, float):
             sanitized["wall_s"] = record["wall_s"]
-        attempts = record.get("attempts", [])
-        if not isinstance(attempts, list):
-            _reject("invalid_author_attempts", relative)
-        sanitized["attempts"] = [{"timed_out": item.get("timed_out") is True}
-                                  for item in attempts if isinstance(item, dict)]
+        sanitized["attempts"] = _public_attempts(record)
         add(relative, _encoded(sanitized), original=raw)
     summary = {"schema_version": 1, "status": "complete" if missing == 0 else "incomplete",
                "all_planned_runs_accounted": missing == 0, "fully_graded": graded == len(expected),

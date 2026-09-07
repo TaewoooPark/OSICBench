@@ -88,6 +88,31 @@ def _write_call(root, row, condition, workspace, private_runtime, audit, *, exit
     return result
 
 
+def _reseal_suspend_inventory(fixture, monkeypatch, *, record=False, state=False):
+    source = fixture["source"]
+    if record:
+        raw = runner._record_path(source, fixture["target"]).read_bytes()
+        monkeypatch.setattr(migrate, "SUSPEND_RECORD_FILE_SHA", migrate._sha(raw))
+        monkeypatch.setattr(migrate, "SUSPEND_RECORD_SHA", json.loads(raw)["record_sha256"])
+    if state:
+        monkeypatch.setattr(
+            migrate, "SUSPEND_STATE_FILE_SHA",
+            migrate._sha((source / "orchestration.json").read_bytes()))
+    inventory = migrate._source_inventory(source)
+    monkeypatch.setattr(
+        migrate, "SUSPEND_INVENTORY",
+        {key: value for key, value in inventory.items() if key != "items"})
+
+
+def _rewrite_target_receipts(source, target, field, value):
+    call_id = f"{target['label']}/{target['task']}/attempt-1"
+    for name in ("process.json", "audit.json"):
+        path = source / "private/logs" / call_id / name
+        receipt = _read(path)
+        receipt[field] = value
+        runtime.write_json(path, receipt)
+
+
 @pytest.fixture
 def amendment(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
@@ -436,3 +461,273 @@ def test_cli_default_remains_initial_migration(monkeypatch):
     monkeypatch.setattr("sys.argv", ["migrate", "--source", "old", "--out", "new"])
     assert migrate.main() == 0
     assert seen and seen[0][2] == migrate.DEFAULT_BASE
+
+
+@pytest.fixture
+def suspended(amendment, monkeypatch):
+    migrate.migrate_parser_amendment(amendment["source"], amendment["out"])
+    source = amendment["out"]
+    manifest = _read(source / "evaluation_manifest.json")
+    monkeypatch.setattr(migrate, "SUSPEND_TARGET", ("claude-sonnet5-max@s2", "t14"))
+    target = next(row for row in manifest["schedule"]
+                  if (row["label"], row["task"]) == migrate.SUSPEND_TARGET)
+    condition = next(item for item in manifest["conditions"] if item["id"] == target["condition"])
+    call_id = f"{target['label']}/{target['task']}/attempt-1"
+    workspace = source / "private/workspaces" / call_id
+    runner._stage(workspace, target["task"])
+    private_runtime = source / "private/runtimes" / call_id
+    reconstructed = _audit(condition)
+    reconstructed.update(completion_successful=False, completion_status="incomplete_or_error",
+                         provider_refusal=False, provider_error=None,
+                         identity_evidence="trace_primary_models", warnings=["incomplete"],
+                         rate_limit={"events": [{"status": "allowed", "isUsingOverage": False}],
+                                     "using_overage": False})
+    audited = copy.deepcopy(reconstructed)
+    audited.update(valid=False, errors=[migrate.SUSPEND_REASON], rate_limited=False)
+    result = _write_call(source, target, condition, workspace, private_runtime, audited)
+    result.update(exit_code=None, timed_out=True, started_epoch_s=1000.0,
+                  finished_epoch_s=3505.0, wall_s=2400.0,
+                  epoch_elapsed_s=2505.0, clock_discontinuity=True)
+    result["provider_audit"] = audited
+    process = {key: value for key, value in result.items()
+               if key in {"status", "exit_code", "timed_out", "command", "cwd", "started_epoch_s",
+                          "finished_epoch_s", "wall_s", "epoch_elapsed_s", "clock_discontinuity", "pid"}}
+    raw_result = copy.deepcopy(result)
+    raw_result["provider_audit"].pop("rate_limited", None)
+    runtime.write_json(source / "private/logs" / call_id / "process.json", process)
+    runtime.write_json(source / "private/logs" / call_id / "audit.json", raw_result)
+    subscription = {"allowed": True, "paid_usage_enabled": False}
+    record = {key: target[key] for key in ("label", "condition", "sample", "task")}
+    record.update(status="blocked", stop_reason="invalid_provider_audit", eligible_for_grading=False,
+                  artifact_present=False, artifact_sha256=None, wall_s=2400.0,
+                  attempts=[dict(result, number=1, status="completed",
+                                 subscription_precheck=subscription)],
+                  provider_audit=audited,
+                  subscription_precheck=subscription, subscription_prechecks=[subscription],
+                  subscription_guard={"stop": False, "reason": None, "rate_limited": False})
+    runner._save_record(runner._record_path(source, target), record)
+    (source / ".runner.lock").touch()
+    runtime.write_json(source / "orchestration.json", {
+        "schema_version": 1, "plan_sha256": manifest["plan_sha256"],
+        "providers": {"anthropic": {"status": "stopped", "reason": "invalid_provider_audit",
+                                      "condition": "claude-sonnet5-max", "task": target["task"],
+                                      "sample": 2},
+                      "openai": {"status": "ready"}},
+        "control_acknowledgements": {"anthropic": [], "openai": []}})
+    counts = {"completed": 4, "blocked": 1, "deferred": 1, "records": 6, "calls": 5,
+              "artifacts": 4, "grades": 1, "failures": 1, "missing": 2638}
+    monkeypatch.setattr(migrate, "SUSPEND_COUNTS", counts)
+    monkeypatch.setattr(migrate, "SUSPEND_PLAN", manifest["plan_sha256"])
+    target_raw = runner._record_path(source, target).read_bytes()
+    monkeypatch.setattr(migrate, "SUSPEND_RECORD_FILE_SHA", migrate._sha(target_raw))
+    monkeypatch.setattr(migrate, "SUSPEND_RECORD_SHA", _read(runner._record_path(source, target))["record_sha256"])
+    monkeypatch.setattr(migrate, "SUSPEND_MANIFEST_FILE_SHA",
+                        migrate._sha((source / "evaluation_manifest.json").read_bytes()))
+    monkeypatch.setattr(migrate, "SUSPEND_STATE_FILE_SHA",
+                        migrate._sha((source / "orchestration.json").read_bytes()))
+    inventory = migrate._source_inventory(source)
+    monkeypatch.setattr(migrate, "SUSPEND_INVENTORY",
+                        {key: value for key, value in inventory.items() if key != "items"})
+    proof = {"base_commit": "b" * 40, "current_commit": "c" * 40,
+             "base_source_sha256": "new-parser-source",
+             "current_source_sha256": "new-parser-source",
+             "benchmark_sha256": "benchmark", "changed_files": [],
+             "support_source_sha256": {}, "source_files": {},
+             "invariants": {"terminal_accounting_only": True}}
+    monkeypatch.setattr(migrate, "_suspend_source_proof", lambda *_args: copy.deepcopy(proof))
+    monkeypatch.setattr(runner, "_commit", lambda: "c" * 40)
+
+    def inspect(_stdout, _stderr, model, effort, allow_incomplete=False):
+        assert model == condition["model"] and effort == condition["effort"] and allow_incomplete
+        return copy.deepcopy(reconstructed)
+
+    monkeypatch.setattr(migrate.claude_adapter, "inspect_trace", inspect)
+    return {"source": source, "out": source.parent / "scoring-v4", "target": target,
+            "manifest": manifest, "counts": counts}
+
+
+def _migrate_suspended(fixture):
+    return migrate.migrate_suspend_amendment(
+        fixture["source"], fixture["out"], base_commit="b" * 40)
+
+
+def test_suspend_migration_preserves_source_and_accounts_exact_seeds(suspended):
+    source, out, target = suspended["source"], suspended["out"], suspended["target"]
+    before = _snapshot(source)
+    source_manifest_raw = (source / "evaluation_manifest.json").read_bytes()
+    source_state_raw = (source / "orchestration.json").read_bytes()
+    source_receipt_raw = (source / "migration_receipt.json").read_bytes()
+    source_records = {
+        path.relative_to(source / "authoring"): path.read_bytes()
+        for path in (source / "authoring").glob("*/*.json")
+    }
+    source_call_ids = sorted(
+        f"{record['label']}/{record['task']}/attempt-{attempt['number']}"
+        for raw in source_records.values()
+        for record in [json.loads(raw)]
+        for attempt in record.get("attempts", []))
+    source_artifacts = _snapshot(source / "private/artifacts")
+    source_logs = _snapshot(source / "private/logs")
+    source_grading_logs = _snapshot(source / "grading_logs")
+    source_prior_amendment = _snapshot(source / "private/amendment")
+    source_controls = _snapshot(source / "control")
+    target_call = f"{target['label']}/{target['task']}/attempt-1"
+    source_target_workspace = _snapshot(source / "private/workspaces" / target_call)
+    source_runs = {
+        path.parent.relative_to(source): _snapshot(path.parent)
+        for outcome in ("grade.json", "failure.json")
+        for path in source.glob(f"*/*/{outcome}")
+    }
+    source_inventory = migrate._source_inventory(source)
+    source_inventory.pop("items")
+
+    receipt = _migrate_suspended(suspended)
+
+    assert _snapshot(source) == before
+    for relative, raw in source_records.items():
+        assert (out / "authoring" / relative).read_bytes() == raw
+        assert (out / "private/amendment/source-authoring" / relative).read_bytes() == raw
+    assert _snapshot(out / "private/artifacts") == source_artifacts
+    assert _snapshot(out / "private/logs") == source_logs
+    assert _snapshot(out / "grading_logs") == source_grading_logs
+    for relative, tree in source_runs.items():
+        assert _snapshot(out / relative) == tree
+    archive = out / "private/amendment"
+    assert (archive / "source-manifest.json").read_bytes() == source_manifest_raw
+    assert (archive / "source-orchestration.json").read_bytes() == source_state_raw
+    assert (archive / "source-migration-receipt.json").read_bytes() == source_receipt_raw
+    assert _snapshot(archive / "prior-amendment") == source_prior_amendment
+    assert _snapshot(archive / "source-control") == source_controls
+    assert _snapshot(archive / "non-graded-target-workspace") == source_target_workspace
+    assert receipt["provider_calls_performed"] == 0
+    assert receipt["subscription_checks_performed"] == 0
+    assert receipt["grading_calls_performed"] == 0
+    assert receipt["credentials_copied"] is False
+    assert receipt["prior_controls_replayed"] is False
+    assert receipt["source_inventory"] == source_inventory
+    assert receipt["source_manifest_file_sha256"] == migrate._sha(source_manifest_raw)
+    assert receipt["source_orchestration_file_sha256"] == migrate._sha(source_state_raw)
+    assert receipt["source_migration_receipt_sha256"] == migrate._sha(source_receipt_raw)
+    assert receipt["prior_amendment_tree_sha256"] == migrate._map_sha256(source_prior_amendment)
+    assert receipt["source_control_tree_sha256"] == migrate._map_sha256(source_controls)
+    assert receipt["source_native_logs_sha256"] == migrate._map_sha256(source_logs)
+    assert receipt["source_artifacts_sha256"] == migrate._map_sha256(source_artifacts)
+    assert receipt["grading_logs_sha256"] == migrate._map_sha256(source_grading_logs)
+    assert receipt["native_calls_preserved"] == len(source_call_ids)
+    assert receipt["native_call_identities_sha256"] == migrate._sha(
+        json.dumps(source_call_ids, separators=(",", ":")).encode())
+    assert receipt["schedule"]["ordinary_records_byte_preserved"] == len(source_records) - 1
+    assert receipt["schedule"]["target_record_byte_preserved"] is True
+    preserved_runs = {
+        f"{relative.as_posix()}/{name}": digest
+        for relative, tree in source_runs.items()
+        for name, digest in tree.items()
+    }
+    assert receipt["preserved_runs_sha256"] == migrate._map_sha256(preserved_runs)
+    assert receipt["schedule"]["derived_failure_records_created"] == 5
+    assert receipt["schedule"]["missing_runs_after_migration"] == 2633
+    assert receipt["operational_failure"]["reason"] == migrate.SUSPEND_REASON
+    assert receipt["operational_failure"]["non_graded_evidence"] is True
+    target_raw = source_records[Path(target["label"]) / f"{target['task']}.json"]
+    assert receipt["operational_failure"]["source_record_file_sha256"] == migrate._sha(target_raw)
+    assert receipt["operational_failure"]["source_record_sha256"] == json.loads(target_raw)["record_sha256"]
+    for seed in suspended["manifest"]["seeds"]:
+        directory = out / target["label"] / f"{target['task']}_s{seed}"
+        assert [path.name for path in directory.iterdir()] == ["failure.json"]
+        assert _read(directory / "failure.json") == {
+            "label": target["label"], "task": target["task"], "seed": seed,
+            "stage": "authoring", "reason": migrate.SUSPEND_REASON}
+    assert (out / "private/amendment/non-graded-target-workspace").is_dir()
+    assert not (out / "private/artifacts" / target["label"] / target["task"]).exists()
+    assert not (out / "private/runtimes").exists()
+    state = _read(out / "orchestration.json")
+    assert all(value["status"] == "paused" for value in state["providers"].values())
+    assert state["control_acknowledgements"] == {"anthropic": [], "openai": []}
+    target_manifest = runner._verify_plan(out)
+    assert _read(out / "migration_receipt.json") == receipt
+    assert receipt["source_plan_sha256"] == suspended["manifest"]["plan_sha256"]
+    assert receipt["target_plan_sha256"] == target_manifest["plan_sha256"] == state["plan_sha256"]
+    assert target_manifest["migration"] == {
+        "schema_version": 1,
+        "amendment_id": migrate.SUSPEND_AMENDMENT_ID,
+        "source_plan_sha256": receipt["source_plan_sha256"],
+        "source_manifest_file_sha256": receipt["source_manifest_file_sha256"],
+        "source_migration_receipt_sha256": receipt["source_migration_receipt_sha256"],
+    }
+    for field in receipt["unchanged_plan_fields"]:
+        assert target_manifest[field] == suspended["manifest"][field]
+    status = runner.status(out)
+    assert status["authoring"] == {"completed": 4, "blocked": 1, "deferred": 523}
+    assert status["grading"] == {"graded": 1, "failure": 6, "missing": 2633}
+
+
+@pytest.mark.parametrize("change", ["clock", "timeout", "audit", "artifact", "run", "state", "record"])
+def test_suspend_migration_rejects_changed_target_or_state(suspended, monkeypatch, change):
+    source, target = suspended["source"], suspended["target"]
+    record_path = runner._record_path(source, target)
+    record = _read(record_path)
+    if change == "clock":
+        record["attempts"][0]["clock_discontinuity"] = False
+        runner._save_record(record_path, record)
+        _rewrite_target_receipts(source, target, "clock_discontinuity", False)
+    elif change == "timeout":
+        record["attempts"][0]["timed_out"] = False
+        runner._save_record(record_path, record)
+        _rewrite_target_receipts(source, target, "timed_out", False)
+    elif change == "audit":
+        record["provider_audit"]["errors"].append("other")
+        record["attempts"][0]["provider_audit"]["errors"].append("other")
+        runner._save_record(record_path, record)
+        audit_path = (source / "private/logs" / target["label"] / target["task"] /
+                      "attempt-1/audit.json")
+        audit_receipt = _read(audit_path)
+        audit_receipt["provider_audit"]["errors"].append("other")
+        runtime.write_json(audit_path, audit_receipt)
+    elif change == "artifact":
+        path = runner._artifact_path(source, target)
+        path.mkdir(parents=True)
+    elif change == "run":
+        seed = suspended["manifest"]["seeds"][0]
+        runtime.write_json(source / target["label"] / f"{target['task']}_s{seed}/failure.json",
+                           {"label": target["label"], "task": target["task"], "seed": seed,
+                            "stage": "authoring", "reason": migrate.SUSPEND_REASON})
+    elif change == "state":
+        state = _read(source / "orchestration.json")
+        state["providers"]["anthropic"] = {"status": "ready"}
+        runtime.write_json(source / "orchestration.json", state)
+    else:
+        record["wall_s"] += 1
+        runner._save_record(record_path, record)
+    _reseal_suspend_inventory(
+        suspended, monkeypatch,
+        record=change in {"clock", "timeout", "audit", "record"},
+        state=change == "state")
+    expected = {
+        "clock": "Suspension attempt has conflicting provider or process evidence",
+        "timeout": "Suspension attempt has conflicting provider or process evidence",
+        "audit": "Suspension attempt has conflicting provider or process evidence",
+        "artifact": "Blocked source record is not the declared no-artifact suspension case",
+        "run": "Cached failure provenance is inconsistent",
+        "state": "Source orchestration is not the declared quiescent suspension state",
+        "record": "Suspension timing does not independently prove a clock discontinuity",
+    }
+    with pytest.raises(migrate.MigrationInvalid, match=expected[change]):
+        _migrate_suspended(suspended)
+    assert not suspended["out"].exists()
+
+
+def test_suspend_migration_rejects_inventory_seal_change(suspended):
+    (suspended["source"] / "private/unexpected-evidence.txt").write_text("changed\n")
+    with pytest.raises(
+            migrate.MigrationInvalid,
+            match="Stopped source inventory differs from the declared immutable baseline"):
+        _migrate_suspended(suspended)
+    assert not suspended["out"].exists()
+
+
+def test_suspend_migration_rejects_held_lock(suspended):
+    with (suspended["source"] / ".runner.lock").open("rb") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(migrate.MigrationInvalid, match="still running"):
+            _migrate_suspended(suspended)
+    assert not suspended["out"].exists()

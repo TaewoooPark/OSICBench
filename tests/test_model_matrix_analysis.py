@@ -5,7 +5,7 @@ import json
 import pytest
 
 from experiments.model_matrix.analyze import (
-    build_analysis, holm_adjust, render_markdown, write_analysis,
+    HOST_SUSPENSION_FAILURE, build_analysis, holm_adjust, render_markdown, write_analysis,
 )
 
 
@@ -33,6 +33,33 @@ def _save_refusal(root, row, *, failure=True, record=None):
         path = root / row["label"] / f"{row['task']}_s{row['seed']}" / "failure.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({**row, "reason": "missing_author_artifact"}))
+
+
+def _operational_failure_record(row):
+    audit = {"valid": False, "errors": [HOST_SUSPENSION_FAILURE],
+             "provider_refusal": False, "completion_successful": False,
+             "completion_status": "incomplete_or_error", "requested_model": "model-a",
+             "resolved_model": "model-a", "primary_models": ["model-a"]}
+    record = {key: row[key] for key in ("condition", "sample", "label", "task")}
+    record.update(status="blocked", stop_reason="invalid_provider_audit",
+                  eligible_for_grading=False,
+                  artifact_present=False, artifact_sha256=None, wall_s=2400.0,
+                  attempts=[{"status": "completed", "timed_out": True,
+                             "clock_discontinuity": True, "exit_code": None,
+                             "artifact_present": False, "artifact_sha256": None,
+                             "provider_audit": audit}], provider_audit=audit)
+    return record
+
+
+def _save_operational_failure(root, row, *, record=None, reason=HOST_SUSPENSION_FAILURE,
+                              failure=True):
+    author = root / "authoring" / row["label"] / f"{row['task']}.json"
+    author.parent.mkdir(parents=True, exist_ok=True)
+    author.write_text(json.dumps(record if record is not None else _operational_failure_record(row)))
+    if failure:
+        path = root / row["label"] / f"{row['task']}_s{row['seed']}" / "failure.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**row, "stage": "authoring", "reason": reason}))
 
 
 def _fixture(tmp_path, conditions=("a", "b", "c"), samples=(1, 2, 3),
@@ -148,6 +175,8 @@ def test_missing_grades_are_operational_failures_not_zero_subscores(tmp_path):
         if row["condition"] != "a":
             _grade(root, row, rs=75.0)
     result = build_analysis(root, tasks)
+    assert result["quality_ranking_claim"] is False
+    assert result["pass_accounting"] == "planned_denominator_operational"
     a = result["conditions"]["a"]
     assert a["coverage"]["planned_runs"] == 12
     assert a["coverage"]["observed_failures"] == 0
@@ -183,6 +212,94 @@ def test_refusal_is_distinct_and_does_not_become_a_measured_zero(tmp_path):
     assert all(row[key] is None for row in refused for key in ("dfs", "hss", "rs", "transactions"))
     markdown = render_markdown(result)
     assert "Provider refusals" in markdown and "not graded evidence of instrument-control competence" in markdown
+
+
+def test_host_suspension_is_a_distinct_infrastructure_nonpass_with_null_metrics(tmp_path):
+    root, tasks, rows = _fixture(tmp_path, samples=(1,))
+    affected = [row for row in rows if row["condition"] == "a" and row["task"] == "t01"]
+    for row in rows:
+        if row in affected:
+            _save_operational_failure(root, row)
+        else:
+            _grade(root, row, rs=80)
+
+    result = build_analysis(root, tasks)
+
+    condition = result["conditions"]["a"]
+    assert condition["coverage"]["operational_failure_runs"] == 2
+    assert condition["coverage"]["host_suspend_or_clock_discontinuity_failures"] == 2
+    assert condition["coverage"]["provider_refusal_runs"] == 0
+    assert condition["coverage"]["failure_reasons"] == {HOST_SUSPENSION_FAILURE: 2}
+    assert condition["authoring"]["operational_failure_records"] == 1
+    assert condition["authoring"]["provider_refusal_records"] == 0
+    failed = [row for row in result["runs"] if row["operational_failure"]]
+    assert len(failed) == 2 and all(not row["passed"] for row in failed)
+    assert all(row[key] is None for row in failed for key in ("dfs", "hss", "rs", "transactions"))
+    assert "Operational failures" in render_markdown(result)
+
+
+def test_host_suspension_failure_reason_requires_matching_author_evidence(tmp_path):
+    root, tasks, rows = _fixture(tmp_path, samples=(1,))
+    affected = rows[0]
+    for row in rows[1:]:
+        _grade(root, row)
+    path = root / affected["label"] / f"{affected['task']}_s{affected['seed']}" / "failure.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({**affected, "stage": "authoring",
+                                "reason": HOST_SUSPENSION_FAILURE}))
+
+    with pytest.raises(ValueError, match="requires matching author evidence"):
+        build_analysis(root, tasks)
+
+
+@pytest.mark.parametrize("violation", [
+    "status", "artifact", "attempt_count", "timeout", "clock", "cleanup", "audit",
+])
+def test_host_suspension_evidence_fails_closed(tmp_path, violation):
+    root, tasks, rows = _fixture(tmp_path)
+    record = _operational_failure_record(rows[0])
+    if violation == "status":
+        record["status"] = "completed"
+    elif violation == "artifact":
+        record["artifact_present"] = True
+    elif violation == "attempt_count":
+        record["attempts"].append(dict(record["attempts"][0]))
+    elif violation == "timeout":
+        record["attempts"][-1]["timed_out"] = False
+    elif violation == "clock":
+        record["attempts"][-1]["clock_discontinuity"] = False
+    elif violation == "cleanup":
+        record["attempts"][-1]["cleanup_error"] = "private-error"
+    else:
+        record["provider_audit"]["errors"] = [HOST_SUSPENSION_FAILURE, "other"]
+    _save_operational_failure(root, rows[0], record=record)
+    with pytest.raises(ValueError):
+        build_analysis(root, tasks)
+
+
+def test_host_suspension_failure_reason_cannot_be_reclassified(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_operational_failure(root, rows[0], reason="grading_error")
+    with pytest.raises(ValueError, match="must preserve its operational reason"):
+        build_analysis(root, tasks)
+
+
+def test_host_suspension_requires_authoring_stage_failure(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_operational_failure(root, rows[0])
+    path = root / rows[0]["label"] / f"{rows[0]['task']}_s{rows[0]['seed']}" / "failure.json"
+    failure = json.loads(path.read_text())
+    failure["stage"] = "grading"
+    path.write_text(json.dumps(failure))
+    with pytest.raises(ValueError, match="must preserve its operational reason"):
+        build_analysis(root, tasks)
+
+
+def test_host_suspension_requires_failure_accounting_for_every_seed(tmp_path):
+    root, tasks, rows = _fixture(tmp_path)
+    _save_operational_failure(root, rows[0], failure=False)
+    with pytest.raises(ValueError, match="must preserve its operational reason"):
+        build_analysis(root, tasks)
 
 
 def test_refusal_without_failure_accounting_remains_unresolved(tmp_path):

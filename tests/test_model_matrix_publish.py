@@ -269,6 +269,25 @@ def _publication_refusal(root, row):
     return record
 
 
+def _publication_operational_failure(root, row):
+    audit = {"valid": False, "errors": [publish.analyze.HOST_SUSPENSION_FAILURE],
+             "provider_refusal": False, "completion_successful": False,
+             "completion_status": "incomplete_or_error", "requested_model": "model",
+             "resolved_model": "model", "requested_effort": "low",
+             "effort_verification": "launch_configuration_only", "primary_models": ["model"],
+             "private_trace": "/Users/private/trace"}
+    record = {**row, "status": "blocked", "stop_reason": "invalid_provider_audit",
+              "eligible_for_grading": False, "artifact_present": False,
+              "artifact_sha256": None, "wall_s": 2400.0,
+              "attempts": [{"status": "completed", "timed_out": True,
+                            "clock_discontinuity": True, "exit_code": None,
+                            "artifact_present": False, "artifact_sha256": None,
+                            "provider_audit": audit, "private": "/Users/private/attempt"}],
+              "provider_audit": audit}
+    _write(root / "authoring/model-low/t01.json", record)
+    return record
+
+
 def test_refusal_publication_keeps_failure_provenance_without_fabricating_grades(tmp_path):
     root, tasks, output, run = _fixture(tmp_path, graded=False)
     row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
@@ -291,6 +310,87 @@ def test_refusal_publication_keeps_failure_provenance_without_fabricating_grades
     assert condition["authoring"]["token_usage"]["input_tokens"]["total"] == 12
     assert condition["metrics"]["dfs"]["mean"] is None
     assert not list(output.rglob("grade.json")) and not list(output.rglob("main.py"))
+
+
+def test_operational_failure_publication_keeps_only_safe_terminal_evidence(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    _publication_operational_failure(root, row)
+    _write(run / "failure.json", {**row, "reason": publish.analyze.HOST_SUSPENSION_FAILURE,
+                                  "stage": "authoring", "error": "/Users/private/failure"})
+
+    result = publish.export_bundle(root, tasks, output)
+
+    assert result["status"] == "complete" and not result["fully_graded"]
+    author = json.loads((output / "authoring/model-low/t01.json").read_text())
+    assert author["status"] == "blocked"
+    assert author["outcome"] == publish.analyze.HOST_SUSPENSION_FAILURE
+    assert author["stop_reason"] == "invalid_provider_audit"
+    assert author["provider_audit"]["errors"] == [publish.analyze.HOST_SUSPENSION_FAILURE]
+    assert author["attempts"] == [{"timed_out": True, "status": "completed",
+                                    "clock_discontinuity": True, "exit_code": None,
+                                    "artifact_present": False, "artifact_sha256": None,
+                                    "launch_error": False, "cleanup_error": False}]
+    failure = json.loads((output / "model-low/t01_s19/failure.json").read_text())
+    assert failure["reason"] == publish.analyze.HOST_SUSPENSION_FAILURE
+    analysis = json.loads((output / "analysis/analysis.json").read_text())
+    condition = analysis["conditions"]["model-low"]
+    assert condition["coverage"]["operational_failure_runs"] == 1
+    assert condition["authoring"]["operational_failure_records"] == 1
+    assert condition["metrics"]["dfs"]["mean"] is None
+    encoded = "\n".join(path.read_text() for path in output.rglob("*") if path.is_file())
+    assert "/Users/" not in encoded and "private_trace" not in encoded
+
+
+def test_invalid_operational_failure_cannot_be_published(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = _publication_operational_failure(root, row)
+    record["provider_audit"]["errors"].append("other")
+    _write(root / "authoring/model-low/t01.json", record)
+    _write(run / "failure.json", {**row, "reason": publish.analyze.HOST_SUSPENSION_FAILURE})
+    with pytest.raises(publish.ExportError):
+        publish.export_bundle(root, tasks, output)
+    assert not output.exists()
+
+
+def test_operational_failure_rejects_non_authoring_stage(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    _publication_operational_failure(root, row)
+    _write(run / "failure.json", {**row, "reason": publish.analyze.HOST_SUSPENSION_FAILURE,
+                                  "stage": "grading"})
+    with pytest.raises(publish.ExportError, match="invalid_operational_failure_stage"):
+        publish.export_bundle(root, tasks, output)
+    assert not output.exists()
+
+
+def test_operational_failure_requires_sealed_record(tmp_path):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    record = _publication_operational_failure(root, row)
+    record.pop("record_sha256")
+    (root / "authoring/model-low/t01.json").write_text(json.dumps(record))
+    _write(run / "failure.json", {**row, "reason": publish.analyze.HOST_SUSPENSION_FAILURE,
+                                  "stage": "authoring"})
+    with pytest.raises(publish.ExportError, match="operational_failure_missing_sealed_digest"):
+        publish.export_bundle(root, tasks, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("author", ["absent", "ordinary"])
+def test_operational_failure_reason_requires_matching_author_evidence(tmp_path, author):
+    root, tasks, output, run = _fixture(tmp_path, graded=False)
+    row = json.loads((root / "evaluation_manifest.json").read_text())["expected_runs"][0]
+    if author == "ordinary":
+        _publication_refusal(root, row)
+    _write(run / "failure.json", {**row, "reason": publish.analyze.HOST_SUSPENSION_FAILURE,
+                                  "stage": "authoring"})
+    expected = ("operational_failure_missing_author_record" if author == "absent"
+                else "operational_failure_missing_author_evidence")
+    with pytest.raises(publish.ExportError, match=expected):
+        publish.export_bundle(root, tasks, output)
+    assert not output.exists()
 
 
 def test_imported_record_chain_exports_hashes_not_receipt_contents(tmp_path):
